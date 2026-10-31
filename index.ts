@@ -3,21 +3,18 @@
  *  ==========================================================================
  *  File: index.ts
  *  Author: Ahsan Labib Ramin
- *  Architecture: Express 4 + Better Auth + MongoDB + Vercel Serverless
- *  
- *  FEATURES:
- *  ✅ 100% Serverless Ready (Lazy DB + Lazy Auth factory)
- *  ✅ Fixed cross-domain cookie issues (SameSite=None)
- *  ✅ Complete CRUD for 13 MongoDB Collections
- *  ✅ Extensive input sanitization and validation
- *  ✅ Premium HTML Dashboard (Root, Health, API Docs)
- *  ✅ Auto-promotion of root admin via databaseHooks
- *  ✅ Activity logging for every mutation
- *  ✅ 0% Fake Data (DB starts empty)
- * ========================================================================== */
+ *  Architecture: Express + Better Auth + MongoDB + Vercel Serverless
+ *  ==========================================================================
+ *  এই ফাইলটি অত্যন্ত ডিটেইলড এবং প্রোডাকশন-রেডি। এখানে যা যা আছে:
+ *  - লেজি ডেটাবেস কানেকশন (Vercel cold start fix)
+ *  - Better Auth এর জন্য লেজি ইনিশিয়ালাইজেশন
+ *  - ১৩টি কালেকশনের সম্পূর্ণ CRUD
+ *  - Premium HTML ড্যাশবোর্ড
+ *  ==========================================================================
+ */
 
 /* ==========================================================================
- * SECTION 1: IMPORTS & DEPENDENCIES
+ * SECTION 1: IMPORTS
  * ========================================================================== */
 
 import "dotenv/config";
@@ -36,133 +33,54 @@ import { toNodeHandler, fromNodeHeaders } from "better-auth/node";
  * SECTION 2: ENVIRONMENT CONFIGURATION
  * ========================================================================== */
 
-/**
- * The port the server will listen on. On Vercel, this is ignored (Vercel assigns its own port).
- */
 const PORT = Number(process.env.PORT || 5000);
-
-/**
- * Flag indicating if the application is running in production mode.
- * Controls cookie security, error stack traces, and logging format.
- */
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
-
-/**
- * Flag indicating if the application is running in a Vercel Serverless environment.
- */
 const IS_VERCEL = !!process.env.VERCEL;
-
-/**
- * The allowed frontend URL. Used for CORS and Better Auth trustedOrigins.
- * Trailing slashes are removed to prevent origin mismatch errors.
- */
 const CLIENT_URL = (process.env.CLIENT_URL || "http://localhost:3000").replace(/\/$/, "");
-
-/**
- * The base URL of the backend server. Used by Better Auth to construct callbacks.
- */
 const BETTER_AUTH_URL = (process.env.BETTER_AUTH_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
-
-/**
- * MongoDB connection string. Supports Atlas SRV strings.
- */
 const MONGODB_URI = process.env.MONGODB_URI;
-
-/**
- * The name of the MongoDB database.
- */
 const DB_NAME = process.env.DB_NAME;
 
-/**
- * ImgBB API key for image hosting.
- */
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY?.trim();
-
-/**
- * Resend API key for sending verification emails.
- */
 const RESEND_API_KEY = process.env.RESEND_API_KEY?.trim();
-
-/**
- * The sender email address for Resend.
- */
 const EMAIL_FROM = process.env.EMAIL_FROM?.trim();
 
-/**
- * The display name of the root administrator.
- */
 const ADMIN_NAME = process.env.ADMIN_NAME || "Oasis BIAM Administrator";
-
-/**
- * The email of the root administrator. This email is auto-promoted to admin on signup.
- */
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL?.trim().toLowerCase();
-
-/**
- * The password of the root administrator.
- */
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
-/**
- * The secret key for Better Auth.
- */
 const BETTER_AUTH_SECRET = process.env.BETTER_AUTH_SECRET?.trim();
-
-/**
- * The SameSite policy for cookies.
- * In production, this MUST be "none" for cross-domain frontends (e.g., Vercel).
- */
 const AUTH_COOKIE_SAME_SITE = (
-  process.env.AUTH_COOKIE_SAME_SITE || (IS_PRODUCTION ? "none" : "lax")
+  process.env.AUTH_COOKIE_SAME_SITE || (IS_PRODUCTION ? "lax" : "lax")
 ) as "lax" | "strict" | "none";
 
-/**
- * Default school logo URL.
- */
 const LOGO_URL = "https://i.ibb.co.com/7NzsPGvc/logo.jpg";
-
-/**
- * Default hero slider images for the homepage.
- */
 const HERO_SLIDES = [
   "https://i.ibb.co.com/j9p9vNfJ/images-1.jpg",
   "https://i.ibb.co.com/67z0dmbS/images.jpg",
 ];
-
-/**
- * The current API version for response headers.
- */
 const API_VERSION = "5.0.0";
 
 /* ==========================================================================
  * SECTION 3: FATAL ENVIRONMENT VALIDATION
  * ========================================================================== */
 
-if (!MONGODB_URI) throw new Error("❌ FATAL: MONGODB_URI is missing.");
-if (!DB_NAME) throw new Error("❌ FATAL: DB_NAME is missing.");
+if (!MONGODB_URI) throw new Error("FATAL: MONGODB_URI is missing.");
+if (!DB_NAME) throw new Error("FATAL: DB_NAME is missing.");
 if (!BETTER_AUTH_SECRET || BETTER_AUTH_SECRET.length < 32) {
-  throw new Error("❌ FATAL: BETTER_AUTH_SECRET must be at least 32 characters.");
+  throw new Error("FATAL: BETTER_AUTH_SECRET must be at least 32 characters.");
 }
 
-if (!IMGBB_API_KEY) console.warn("⚠️ WARNING: IMGBB_API_KEY is missing. Image uploads will fail.");
-if (!ADMIN_EMAIL) console.warn("⚠️ WARNING: ADMIN_EMAIL is missing. Auto-promotion is disabled.");
-
 /* ==========================================================================
- * SECTION 4: TYPE DEFINITIONS (EXHAUSTIVE SCHEMAS)
+ * SECTION 4: TYPE DEFINITIONS (সম্পূর্ণ স্কিমা)
  * ========================================================================== */
 
-/**
- * Base document interface representing common fields in every MongoDB collection.
- */
 interface BaseDoc extends Document {
   _id: ObjectId;
   createdAt: Date;
   updatedAt?: Date;
 }
 
-/**
- * User Document (Managed by Better Auth + Extended fields).
- */
 interface UserDoc extends BaseDoc {
   id: string;
   email: string;
@@ -174,9 +92,6 @@ interface UserDoc extends BaseDoc {
   address?: string;
 }
 
-/**
- * Notice Document (School Announcements).
- */
 interface NoticeDoc extends BaseDoc {
   title: string;
   content: string;
@@ -186,9 +101,6 @@ interface NoticeDoc extends BaseDoc {
   authorName: string;
 }
 
-/**
- * Article Document (News and Blog Posts).
- */
 interface ArticleDoc extends BaseDoc {
   title: string;
   slug: string;
@@ -202,9 +114,6 @@ interface ArticleDoc extends BaseDoc {
   published: boolean;
 }
 
-/**
- * Teacher Document (Faculty Members).
- */
 interface TeacherDoc extends BaseDoc {
   name: string;
   role: "principal" | "vice-principal" | "teacher";
@@ -219,9 +128,6 @@ interface TeacherDoc extends BaseDoc {
   order: number;
 }
 
-/**
- * Governing Body Document (Board Members).
- */
 interface GoverningBodyDoc extends BaseDoc {
   name: string;
   position: string;
@@ -230,9 +136,6 @@ interface GoverningBodyDoc extends BaseDoc {
   order: number;
 }
 
-/**
- * Contact Document (Messages from the contact form).
- */
 interface ContactDoc extends BaseDoc {
   name: string;
   email: string;
@@ -242,9 +145,6 @@ interface ContactDoc extends BaseDoc {
   status: "new" | "read" | "replied" | "archived";
 }
 
-/**
- * Admission Document (Student Applications).
- */
 interface AdmissionDoc extends BaseDoc {
   studentName: string;
   fatherName: string;
@@ -260,9 +160,6 @@ interface AdmissionDoc extends BaseDoc {
   status: "pending" | "approved" | "rejected";
 }
 
-/**
- * Notification Document (Admin Alerts).
- */
 interface NotificationDoc extends BaseDoc {
   title: string;
   message: string;
@@ -271,9 +168,6 @@ interface NotificationDoc extends BaseDoc {
   readAt?: Date;
 }
 
-/**
- * Settings Document (Global Site Configuration).
- */
 interface SettingsDoc extends BaseDoc {
   _id: any;
   siteName: string;
@@ -287,9 +181,6 @@ interface SettingsDoc extends BaseDoc {
   instagram: string;
 }
 
-/**
- * Gallery Document (Images).
- */
 interface GalleryDoc extends BaseDoc {
   title: string;
   image: string;
@@ -297,9 +188,6 @@ interface GalleryDoc extends BaseDoc {
   category: string;
 }
 
-/**
- * Event Document (School Events).
- */
 interface EventDoc extends BaseDoc {
   title: string;
   date: string;
@@ -310,9 +198,6 @@ interface EventDoc extends BaseDoc {
   category: string;
 }
 
-/**
- * Achievement Document (Awards).
- */
 interface AchievementDoc extends BaseDoc {
   title: string;
   description: string;
@@ -321,9 +206,6 @@ interface AchievementDoc extends BaseDoc {
   category: string;
 }
 
-/**
- * Activity Document (Audit Log).
- */
 interface ActivityDoc extends BaseDoc {
   action: string;
   entity: string;
@@ -337,19 +219,13 @@ interface ActivityDoc extends BaseDoc {
 }
 
 /* ==========================================================================
- * SECTION 5: LAZY DATABASE CONNECTION
+ * SECTION 5: LAZY DATABASE CONNECTION (Vercel Fix)
  * ========================================================================== */
 
 let mongoClient: MongoClient | null = null;
 let database: Db | null = null;
 let connectionPromise: Promise<Db> | null = null;
 
-/**
- * Lazily connects to MongoDB.
- * This is critical for Vercel Serverless cold starts. If we connect at module load,
- * the function crashes if MongoDB is slow. By connecting lazily, we can retry on
- * the next request and always respond to the client.
- */
 async function getDB(): Promise<Db> {
   if (database) return database;
   if (connectionPromise) return connectionPromise;
@@ -401,10 +277,6 @@ const activityCol = () => getDB().then((d) => d.collection<ActivityDoc>("activit
  * SECTION 7: ERROR ARCHITECTURE
  * ========================================================================== */
 
-/**
- * Custom operational error class.
- * Allows us to throw errors with specific HTTP status codes from anywhere in the app.
- */
 class AppError extends Error {
   statusCode: number;
   isOperational: boolean;
@@ -417,9 +289,6 @@ class AppError extends Error {
   }
 }
 
-/**
- * Wraps an async route handler to catch errors and pass them to the global error handler.
- */
 const catchAsync = (
   fn: (req: Request, res: Response, next: NextFunction) => Promise<any>
 ): RequestHandler => {
@@ -427,7 +296,7 @@ const catchAsync = (
 };
 
 /* ==========================================================================
- * SECTION 8: RESPONSE HELPERS
+ * SECTION 8: RESPONSE HELPERS & UTILITIES
  * ========================================================================== */
 
 const ok = (res: Response, data: any, status = 200) =>
@@ -453,13 +322,9 @@ const paginated = (res: Response, items: any[], page: number, limit: number, tot
     },
   });
 
-/* ==========================================================================
- * SECTION 9: VALIDATION & SANITIZATION UTILITIES
- * ========================================================================== */
-
 const parseId = (id: string): ObjectId => {
   try { return new ObjectId(id); } 
-  catch { throw new AppError("Invalid ID format. Must be a 24-character hex string.", 400); }
+  catch { throw new AppError("Invalid ID format. Must be 24-char hex.", 400); }
 };
 
 const validateRequired = (body: any, fields: string[]): void => {
@@ -468,9 +333,7 @@ const validateRequired = (body: any, fields: string[]): void => {
     const v = body[f];
     return v === undefined || v === null || (typeof v === "string" && !v.trim());
   });
-  if (missing.length > 0) {
-    throw new AppError(`Missing required fields: ${missing.join(", ")}`, 400);
-  }
+  if (missing.length > 0) throw new AppError(`Missing required fields: ${missing.join(", ")}`, 400);
 };
 
 const cleanString = (value: any, fallback: string = ""): string => {
@@ -516,7 +379,7 @@ const getPagination = (pageStr?: string, limitStr?: string) => {
 const generateRequestId = (): string => Math.random().toString(36).substring(2, 10);
 
 /* ==========================================================================
- * SECTION 10: ACTIVITY LOGGING & NOTIFICATIONS
+ * SECTION 9: ACTIVITY LOGGING & NOTIFICATIONS
  * ========================================================================== */
 
 async function logActivity(req: Request, action: string, entity: string, entityId?: string, details?: any): Promise<void> {
@@ -539,7 +402,7 @@ async function createNotification(title: string, message: string, type: "info" |
 }
 
 /* ==========================================================================
- * SECTION 11: BETTER AUTH & EMAIL VERIFICATION
+ * SECTION 10: BETTER AUTH & EMAIL
  * ========================================================================== */
 
 async function sendVerificationEmail(user: { name?: string | null; email: string }, url: string): Promise<void> {
@@ -563,7 +426,7 @@ async function sendVerificationEmail(user: { name?: string | null; email: string
 }
 
 /* ==========================================================================
- * SECTION 12: LAZY BETTER AUTH FACTORY (FIXES VERCEL 500 ERRORS)
+ * SECTION 11: LAZY BETTER AUTH FACTORY (🔧 Vercel Fix)
  * ========================================================================== */
 
 type AuthInstance = ReturnType<typeof betterAuth>;
@@ -579,8 +442,13 @@ function getAuth(): Promise<AuthInstance> {
         const instance = betterAuth({
           secret: BETTER_AUTH_SECRET!,
           baseURL: BETTER_AUTH_URL,
-          database: mongodbAdapter(db), // ✅ REAL DB INSTANCE
-          trustedOrigins: [CLIENT_URL, "http://localhost:3000", "http://127.0.0.1:3000", "https://oasis-biam-laboratory-school.vercel.app"],
+          database: mongodbAdapter(db),
+          trustedOrigins: [
+            CLIENT_URL, 
+            "http://localhost:3000", 
+            "http://127.0.0.1:3000", 
+            "https://oasis-biam-laboratory-school.vercel.app"
+          ],
           emailAndPassword: {
             enabled: true,
             requireEmailVerification: false,
@@ -650,7 +518,7 @@ function getAuth(): Promise<AuthInstance> {
 }
 
 /* ==========================================================================
- * SECTION 13: EXPRESS APP & GLOBAL MIDDLEWARE
+ * SECTION 12: EXPRESS APP & GLOBAL MIDDLEWARE
  * ========================================================================== */
 
 const app = express();
@@ -659,7 +527,12 @@ if (IS_PRODUCTION) app.set("trust proxy", 1);
 
 app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" }, contentSecurityPolicy: false }));
 
-const allowedOrigins = new Set([CLIENT_URL, "http://localhost:3000", "http://127.0.0.1:3000", "https://oasis-biam-laboratory-school.vercel.app"]);
+const allowedOrigins = new Set([
+  CLIENT_URL, 
+  "http://localhost:3000", 
+  "http://127.0.0.1:3000", 
+  "https://oasis-biam-laboratory-school.vercel.app"
+]);
 
 app.use(cors({
   origin: (origin, cb) => {
@@ -694,7 +567,7 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 /* ==========================================================================
- * SECTION 14: FILE UPLOAD CONFIGURATION
+ * SECTION 13: FILE UPLOAD
  * ========================================================================== */
 
 const upload = multer({
@@ -707,7 +580,7 @@ const upload = multer({
 });
 
 /* ==========================================================================
- * SECTION 15: SESSION MIDDLEWARE & AUTH GUARDS
+ * SECTION 14: SESSION MIDDLEWARE & AUTH GUARDS
  * ========================================================================== */
 
 declare global {
@@ -742,7 +615,7 @@ const requireAdmin = catchAsync(async (req: Request, res: Response, next: NextFu
 });
 
 /* ==========================================================================
- * SECTION 16: PREMIUM CSS (MASSIVE)
+ * SECTION 15: PREMIUM CSS
  * ========================================================================== */
 
 const PREMIUM_CSS = `
@@ -798,7 +671,7 @@ body{background:var(--bg-base);background-image:radial-gradient(circle at top le
 `;
 
 /* ==========================================================================
- * SECTION 17: PREMIUM HTML ROUTES
+ * SECTION 16: PREMIUM HTML ROUTES
  * ========================================================================== */
 
 app.get("/", (_req, res) => {
@@ -915,7 +788,7 @@ app.get("/api/docs", (_req, res) => {
 });
 
 /* ==========================================================================
- * SECTION 18: CONFIG & STATS
+ * SECTION 17: CONFIG & STATS
  * ========================================================================== */
 
 app.get("/api/config/auth", catchAsync(async (_req, res) => {
@@ -931,7 +804,7 @@ app.get("/api/stats", catchAsync(async (_req, res) => {
 }));
 
 /* ==========================================================================
- * SECTION 19: SETTINGS & USERS
+ * SECTION 18: SETTINGS & USERS
  * ========================================================================== */
 
 app.get("/api/settings", catchAsync(async (_req, res) => {
@@ -992,7 +865,7 @@ app.delete("/api/users/:id", requireAdmin, catchAsync(async (req, res) => {
 }));
 
 /* ==========================================================================
- * SECTION 20: NOTICES & ARTICLES
+ * SECTION 19: NOTICES & ARTICLES
  * ========================================================================== */
 
 app.get("/api/notices", catchAsync(async (req, res) => {
@@ -1099,7 +972,7 @@ app.delete("/api/articles/:id", requireAdmin, catchAsync(async (req, res) => {
 }));
 
 /* ==========================================================================
- * SECTION 21: TEACHERS, GOVERNING BODY, GALLERY, EVENTS, ACHIEVEMENTS
+ * SECTION 20: TEACHERS, GOVERNING BODY, GALLERY, EVENTS, ACHIEVEMENTS
  * ========================================================================== */
 
 app.get("/api/teachers", catchAsync(async (req, res) => {
@@ -1284,7 +1157,7 @@ app.delete("/api/achievements/:id", requireAdmin, catchAsync(async (req, res) =>
 }));
 
 /* ==========================================================================
- * SECTION 22: CONTACTS, ADMISSIONS, NOTIFICATIONS, ACTIVITY
+ * SECTION 21: CONTACTS, ADMISSIONS, NOTIFICATIONS, ACTIVITY
  * ========================================================================== */
 
 app.post("/api/contacts", catchAsync(async (req, res) => {
@@ -1389,7 +1262,7 @@ app.get("/api/activity", requireAdmin, catchAsync(async (req, res) => {
 }));
 
 /* ==========================================================================
- * SECTION 23: SEARCH, EXPORT, UPLOAD
+ * SECTION 22: SEARCH, EXPORT, UPLOAD
  * ========================================================================== */
 
 app.get("/api/search", catchAsync(async (req, res) => {
@@ -1436,7 +1309,7 @@ app.post("/api/upload", requireAdmin, upload.single("image"), catchAsync(async (
 }));
 
 /* ==========================================================================
- * SECTION 24: GLOBAL ERROR HANDLING
+ * SECTION 23: GLOBAL ERROR HANDLING
  * ========================================================================== */
 
 app.use((req, res, next) => next(new AppError(`Route not found: ${req.method} ${req.originalUrl}`, 404)));
@@ -1454,7 +1327,7 @@ app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
 });
 
 /* ==========================================================================
- * SECTION 25: EXPORT & STARTUP
+ * SECTION 24: EXPORT & STARTUP
  * ========================================================================== */
 
 export default app;
