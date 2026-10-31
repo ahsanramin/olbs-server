@@ -1,24 +1,19 @@
 /* ==========================================================================
- *  OASIS BIAM LABORATORY SCHOOL — ULTIMATE ENTERPRISE SERVER
+ *  OASIS BIAM LABORATORY SCHOOL — PRODUCTION ENTERPRISE SERVER
  *  ==========================================================================
  *  File: index.ts
- *  Author: Ahsan Labib Ramin
- *  Architecture: Monolithic SaaS Backend (Vercel Serverless + Express + MongoDB)
+ *  Architecture: Express 4 + Better Auth + MongoDB + Vercel Serverless
  *  
- *  ✅ Zero fake data — production starts with empty collections
- *  ✅ Auto-promote ADMIN_EMAIL to admin via Better Auth hooks
- *  ✅ Complete CRUD for 13 collections
- *  ✅ Full-text search, sorting, filtering, pagination
- *  ✅ Bulk operations, CSV/JSON export, analytics with date ranges
- *  ✅ Better Auth (Email/Password + Google OAuth)
- *  ✅ ImgBB image upload with 45s timeout
- *  ✅ 7 premium branded HTML pages
- *  ✅ Vercel Serverless-optimized (lazy MongoDB, ESM export)
- *  ✅ Comprehensive error handling, rate limiting, validation
- * ========================================================================== */
-
-/* ==========================================================================
- *  SECTION 1: IMPORTS
+ *  ✅ Lazy MongoDB connection (no cold-start crashes)
+ *  ✅ Lazy Better Auth factory (fixes Proxy bug)
+ *  ✅ Session middleware uses await getAuth()
+ *  ✅ Real Db instance in mongodbAdapter
+ *  ✅ Zero fake data — DB starts empty
+ *  ✅ Admin auto-promotion via databaseHooks
+ *  ✅ Full CRUD for 13 collections
+ *  ✅ Full validation, sanitization, pagination
+ *  ✅ Premium HTML pages with light/dark themes
+ *  ✅ ESM export default app
  * ========================================================================== */
 
 import "dotenv/config";
@@ -28,15 +23,13 @@ import helmet from "helmet";
 import morgan from "morgan";
 import rateLimit from "express-rate-limit";
 import multer from "multer";
-import {
-  MongoClient, ObjectId, Db, Collection, Document, Filter,
-} from "mongodb";
+import { MongoClient, ObjectId, Db, Collection, Document, Filter } from "mongodb";
 import { betterAuth } from "better-auth";
 import { mongodbAdapter } from "better-auth/adapters/mongodb";
 import { toNodeHandler, fromNodeHeaders } from "better-auth/node";
 
 /* ==========================================================================
- *  SECTION 2: ENVIRONMENT CONFIGURATION
+ *  SECTION 1: ENVIRONMENT CONFIGURATION
  * ========================================================================== */
 
 /**
@@ -44,16 +37,16 @@ import { toNodeHandler, fromNodeHeaders } from "better-auth/node";
  */
 const PORT = Number(process.env.PORT || 5000);
 
-/** Flag indicating production mode. */
+/** Production flag. */
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 
-/** Flag indicating Vercel Serverless environment. */
+/** Vercel serverless flag. */
 const IS_VERCEL = !!process.env.VERCEL;
 
-/** Frontend URL for CORS and Better Auth trustedOrigins. */
+/** Frontend URL for CORS + Better Auth. */
 const CLIENT_URL = (process.env.CLIENT_URL || "http://localhost:3000").replace(/\/$/, "");
 
-/** Better Auth base URL. */
+/** Backend URL for Better Auth. */
 const BETTER_AUTH_URL = (process.env.BETTER_AUTH_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
 
 /** MongoDB connection URI. */
@@ -62,268 +55,63 @@ const MONGODB_URI = process.env.MONGODB_URI;
 /** MongoDB database name. */
 const DB_NAME = process.env.DB_NAME;
 
-/** ImgBB API key for image uploads. */
+/** ImgBB API key. */
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY?.trim();
 
-/** Resend API key for email delivery. */
+/** Resend API key. */
 const RESEND_API_KEY = process.env.RESEND_API_KEY?.trim();
 
-/** Sender address for outgoing emails. */
+/** Sender email. */
 const EMAIL_FROM = process.env.EMAIL_FROM?.trim();
 
-/** Root admin display name. */
+/** Admin display name. */
 const ADMIN_NAME = process.env.ADMIN_NAME || "Oasis BIAM Administrator";
 
-/** Root admin email — this email auto-promotes to admin. */
+/** Admin email — auto-promoted on signup. */
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL?.trim().toLowerCase();
 
-/** Root admin password (used for initial seeding only). */
+/** Admin password. */
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+
+/** Better Auth secret (validated below). */
+const BETTER_AUTH_SECRET = process.env.BETTER_AUTH_SECRET?.trim();
 
 /** Cookie SameSite policy. */
 const AUTH_COOKIE_SAME_SITE = (
   process.env.AUTH_COOKIE_SAME_SITE || (IS_PRODUCTION ? "none" : "lax")
 ) as "lax" | "strict" | "none";
 
-/** Default school logo URL. */
+/** Logo URL. */
 const LOGO_URL = "https://i.ibb.co.com/7NzsPGvc/logo.jpg";
 
-/** Default hero slider images. */
+/** Hero slides. */
 const HERO_SLIDES = [
   "https://i.ibb.co.com/j9p9vNfJ/images-1.jpg",
   "https://i.ibb.co.com/67z0dmbS/images.jpg",
 ];
 
-/** API version string for response headers. */
-const API_VERSION = "2.0.0";
-
-/** Rate limit window in milliseconds (15 minutes). */
-const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
-
-/** Max requests per rate limit window per IP. */
-const RATE_LIMIT_MAX = 2000;
-
-/** Max upload file size (5 MB). */
-const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
-
-/** Allowed image MIME types. */
-const ALLOWED_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);
+/** API version. */
+const API_VERSION = "3.0.0";
 
 /* ==========================================================================
- *  SECTION 3: TYPE DEFINITIONS — FULL SCHEMAS FOR ALL COLLECTIONS
+ *  SECTION 2: FATAL ENVIRONMENT VALIDATION (THROWS, doesn't just log)
  * ========================================================================== */
 
-/**
- * Base document fields present on every MongoDB document.
- */
-interface BaseDoc extends Document {
-  _id: ObjectId;
-  createdAt: Date;
-  updatedAt?: Date;
+if (!MONGODB_URI) {
+  throw new Error("MONGODB_URI environment variable is missing");
+}
+if (!DB_NAME) {
+  throw new Error("DB_NAME environment variable is missing");
+}
+if (!BETTER_AUTH_SECRET || BETTER_AUTH_SECRET.length < 32) {
+  throw new Error("BETTER_AUTH_SECRET must be at least 32 characters");
 }
 
-/**
- * User account (extends Better Auth user schema with custom fields).
- */
-interface UserDoc extends BaseDoc {
-  id: string;
-  email: string;
-  emailVerified: boolean;
-  name: string;
-  image?: string | null;
-  role: "admin" | "member";
-  phone?: string;
-  address?: string;
-}
-
-/**
- * School notice / announcement.
- */
-interface NoticeDoc extends BaseDoc {
-  title: string;
-  content: string;
-  category: string;
-  featured: boolean;
-  authorId: string;
-  authorName: string;
-}
-
-/**
- * Blog article / news post.
- */
-interface ArticleDoc extends BaseDoc {
-  title: string;
-  slug: string;
-  excerpt: string;
-  content: string;
-  coverImage: string | null;
-  category: string;
-  authorId: string;
-  authorName: string;
-  views: number;
-  published: boolean;
-}
-
-/**
- * Faculty member (teacher / principal / vice-principal).
- */
-interface TeacherDoc extends BaseDoc {
-  name: string;
-  role: "principal" | "vice-principal" | "teacher";
-  designation: string;
-  subject: string;
-  image: string | null;
-  bio: string;
-  email: string;
-  phone: string;
-  qualification: string;
-  experience: string;
-  order: number;
-}
-
-/**
- * Governing body member.
- */
-interface GoverningBodyDoc extends BaseDoc {
-  name: string;
-  position: string;
-  image: string | null;
-  isChairman: boolean;
-  order: number;
-}
-
-/**
- * Contact form submission.
- */
-interface ContactDoc extends BaseDoc {
-  name: string;
-  email: string;
-  phone: string;
-  subject: string;
-  message: string;
-  status: "new" | "read" | "replied" | "archived";
-}
-
-/**
- * Admission application.
- */
-interface AdmissionDoc extends BaseDoc {
-  studentName: string;
-  fatherName: string;
-  motherName: string;
-  birthDate: string;
-  bloodGroup: string;
-  classApplyingFor: string;
-  previousClass: string;
-  phone: string;
-  email: string;
-  currentAddress: string;
-  permanentAddress: string;
-  status: "pending" | "approved" | "rejected";
-}
-
-/**
- * Admin system notification.
- */
-interface NotificationDoc extends BaseDoc {
-  title: string;
-  message: string;
-  type: "info" | "success" | "warning" | "error";
-  read: boolean;
-  readAt?: Date;
-}
-
-/**
- * Global site settings (single document, _id = "global_settings").
- */
-interface SettingsDoc extends BaseDoc {
-  _id: any;
-  siteName: string;
-  tagline: string;
-  address: string;
-  phone: string;
-  email: string;
-  facebook: string;
-  youtube: string;
-  twitter: string;
-  instagram: string;
-}
-
-/**
- * Gallery image.
- */
-interface GalleryDoc extends BaseDoc {
-  title: string;
-  image: string;
-  caption: string;
-  category: string;
-}
-
-/**
- * Event (sports day, science fair, etc.).
- */
-interface EventDoc extends BaseDoc {
-  title: string;
-  date: string;
-  time: string;
-  location: string;
-  description: string;
-  image: string | null;
-  category: string;
-}
-
-/**
- * Achievement / award.
- */
-interface AchievementDoc extends BaseDoc {
-  title: string;
-  description: string;
-  year: string;
-  image: string | null;
-  category: string;
-}
-
-/**
- * Activity log entry (audit trail).
- */
-interface ActivityDoc extends BaseDoc {
-  action: string;
-  entity: string;
-  entityId: string | null;
-  details: Record<string, any>;
-  actorId: string | null;
-  actorName: string;
-  actorEmail: string | null;
-  ip: string | null;
-  userAgent: string | null;
-}
-
-/**
- * Search result shape for cross-collection search.
- */
-interface SearchResults {
-  teachers: any[];
-  articles: any[];
-  notices: any[];
-  events: any[];
-  query: string;
-  counts: { teachers: number; articles: number; notices: number; events: number };
-}
+if (!IMGBB_API_KEY) console.warn("⚠️ IMGBB_API_KEY not set — uploads disabled");
+if (!ADMIN_EMAIL) console.warn("⚠️ ADMIN_EMAIL not set — auto-promotion disabled");
 
 /* ==========================================================================
- *  SECTION 4: ENVIRONMENT VALIDATION
- * ========================================================================== */
-
-if (!MONGODB_URI) console.error("❌ FATAL: MONGODB_URI missing");
-if (!DB_NAME) console.error("❌ FATAL: DB_NAME missing");
-if (!process.env.BETTER_AUTH_SECRET || process.env.BETTER_AUTH_SECRET.length < 32) {
-  console.error("❌ FATAL: BETTER_AUTH_SECRET must be ≥32 chars");
-}
-if (!IMGBB_API_KEY) console.warn("⚠️ IMGBB_API_KEY missing — uploads disabled");
-if (!ADMIN_EMAIL) console.warn("⚠️ ADMIN_EMAIL missing — admin auto-promotion disabled");
-
-/* ==========================================================================
- *  SECTION 5: LAZY MONGODB CONNECTION (CRITICAL FOR VERCEL)
+ *  SECTION 3: LAZY MONGODB CONNECTION
  * ========================================================================== */
 
 let mongoClient: MongoClient | null = null;
@@ -331,24 +119,16 @@ let database: Db | null = null;
 let connectionPromise: Promise<Db> | null = null;
 
 /**
- * Lazily connects to MongoDB. Cached after first successful connection.
- * 
- * **Why lazy:** Vercel serverless functions cold-start frequently. Connecting
- * at module load would crash if MongoDB is slow or IP not whitelisted. Lazy
- * connection lets us retry on next request and always respond to the client.
- * 
- * **Never calls process.exit()** — throws instead so error handler can respond.
+ * Lazily connects to MongoDB. Cached after first success.
+ * Retries on failure (resets promise cache).
+ * Never calls process.exit() — lets request handlers respond.
  */
 async function getDB(): Promise<Db> {
   if (database) return database;
   if (connectionPromise) return connectionPromise;
 
   connectionPromise = (async () => {
-    if (!MONGODB_URI || !DB_NAME) {
-      throw new Error("MONGODB_URI or DB_NAME not configured");
-    }
-
-    const client = new MongoClient(MONGODB_URI, {
+    const client = new MongoClient(MONGODB_URI!, {
       maxPoolSize: IS_VERCEL ? 1 : 25,
       minPoolSize: IS_VERCEL ? 0 : 5,
       serverSelectionTimeoutMS: 10000,
@@ -373,49 +153,39 @@ async function getDB(): Promise<Db> {
 }
 
 /* ==========================================================================
- *  SECTION 6: COLLECTION ACCESSORS (LAZY)
+ *  SECTION 4: LAZY COLLECTION ACCESSORS
  * ========================================================================== */
 
-const usersCol = () => getDB().then((d) => d.collection<UserDoc>("user"));
-const noticesCol = () => getDB().then((d) => d.collection<NoticeDoc>("notices"));
-const articlesCol = () => getDB().then((d) => d.collection<ArticleDoc>("articles"));
-const teachersCol = () => getDB().then((d) => d.collection<TeacherDoc>("teachers"));
-const governingCol = () => getDB().then((d) => d.collection<GoverningBodyDoc>("governingBody"));
-const contactsCol = () => getDB().then((d) => d.collection<ContactDoc>("contacts"));
-const admissionsCol = () => getDB().then((d) => d.collection<AdmissionDoc>("admissions"));
-const notificationsCol = () => getDB().then((d) => d.collection<NotificationDoc>("notifications"));
-const settingsCol = () => getDB().then((d) => d.collection<SettingsDoc>("settings"));
-const galleryCol = () => getDB().then((d) => d.collection<GalleryDoc>("gallery"));
-const eventsCol = () => getDB().then((d) => d.collection<EventDoc>("events"));
-const achievementsCol = () => getDB().then((d) => d.collection<AchievementDoc>("achievements"));
-const activityCol = () => getDB().then((d) => d.collection<ActivityDoc>("activityLog"));
+const usersCol = () => getDB().then((d) => d.collection("user"));
+const noticesCol = () => getDB().then((d) => d.collection("notices"));
+const articlesCol = () => getDB().then((d) => d.collection("articles"));
+const teachersCol = () => getDB().then((d) => d.collection("teachers"));
+const governingCol = () => getDB().then((d) => d.collection("governingBody"));
+const contactsCol = () => getDB().then((d) => d.collection("contacts"));
+const admissionsCol = () => getDB().then((d) => d.collection("admissions"));
+const notificationsCol = () => getDB().then((d) => d.collection("notifications"));
+const settingsCol = () => getDB().then((d) => d.collection("settings"));
+const galleryCol = () => getDB().then((d) => d.collection("gallery"));
+const eventsCol = () => getDB().then((d) => d.collection("events"));
+const achievementsCol = () => getDB().then((d) => d.collection("achievements"));
+const activityCol = () => getDB().then((d) => d.collection("activityLog"));
 
 /* ==========================================================================
- *  SECTION 7: ERROR ARCHITECTURE
+ *  SECTION 5: ERROR ARCHITECTURE
  * ========================================================================== */
 
-/**
- * Custom operational error with HTTP status code.
- * Thrown anywhere in the app; caught by global error handler.
- */
 class AppError extends Error {
   statusCode: number;
-  status: string;
   isOperational: boolean;
 
   constructor(message: string, statusCode: number) {
     super(message);
     this.statusCode = statusCode;
-    this.status = `${statusCode}`.startsWith("4") ? "fail" : "error";
     this.isOperational = true;
     Error.captureStackTrace(this, this.constructor);
   }
 }
 
-/**
- * Wraps an async route handler to catch rejections.
- * Eliminates try/catch in every route.
- */
 const catchAsync = (
   fn: (req: Request, res: Response, next: NextFunction) => Promise<any>
 ): RequestHandler => {
@@ -423,7 +193,7 @@ const catchAsync = (
 };
 
 /* ==========================================================================
- *  SECTION 8: RESPONSE HELPERS
+ *  SECTION 6: RESPONSE HELPERS
  * ========================================================================== */
 
 const ok = (res: Response, data: any, status = 200) =>
@@ -435,9 +205,6 @@ const msg = (res: Response, message: string, status = 200) =>
 const fail = (res: Response, message: string, status = 400) =>
   res.status(status).json({ success: false, message });
 
-/**
- * Sends a paginated response with full metadata.
- */
 const paginated = (
   res: Response,
   items: any[],
@@ -461,25 +228,17 @@ const paginated = (
   });
 
 /* ==========================================================================
- *  SECTION 9: VALIDATION UTILITIES
+ *  SECTION 7: VALIDATION & SANITIZATION
  * ========================================================================== */
 
-/**
- * Parses a string into a MongoDB ObjectId.
- * Throws AppError(400) if invalid.
- */
 const parseId = (id: string): ObjectId => {
   try {
     return new ObjectId(id);
   } catch {
-    throw new AppError("Invalid ID format. Must be a 24-character hex string.", 400);
+    throw new AppError("Invalid ID format. Must be 24-char hex.", 400);
   }
 };
 
-/**
- * Validates that required fields are present in a request body.
- * Throws AppError listing all missing fields.
- */
 const validateRequired = (body: any, fields: string[]): void => {
   if (!body) throw new AppError("Request body is empty", 400);
   const missing = fields.filter((f) => {
@@ -491,18 +250,12 @@ const validateRequired = (body: any, fields: string[]): void => {
   }
 };
 
-/**
- * Trims a string or falls back to a default.
- */
 const cleanString = (value: any, fallback: string = ""): string => {
   if (typeof value === "string") return value.trim();
   if (value === null || value === undefined) return fallback;
   return String(value).trim();
 };
 
-/**
- * Sanitizes user input by removing potentially dangerous HTML tags.
- */
 const sanitizeInput = (input: string): string => {
   return input
     .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
@@ -511,94 +264,40 @@ const sanitizeInput = (input: string): string => {
     .replace(/on\w+=/gi, "");
 };
 
-/**
- * Escapes HTML entities for safe HTML injection.
- */
 const escapeHtml = (value: string): string => {
   return value.replace(/[&<>"']/g, (char) => {
     const entities: Record<string, string> = {
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;",
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
     };
     return entities[char] || char;
   });
 };
 
-/* ==========================================================================
- *  SECTION 10: PAGINATION & SORTING
- * ========================================================================== */
-
-/**
- * Parses pagination query parameters with sane defaults.
- */
-const getPagination = (pageStr?: string, limitStr?: string) => {
-  const page = Math.max(1, parseInt(pageStr || "1", 10) || 1);
-  const limit = Math.min(100, Math.max(1, parseInt(limitStr || "20", 10) || 20));
-  const skip = (page - 1) * limit;
-  return { page, limit, skip };
-};
-
-/**
- * Parses sort query param (e.g., "createdAt:desc" or "title:asc").
- */
-const getSort = (sortStr?: string, allowedFields: string[] = []): Record<string, 1 | -1> => {
-  const defaultSort = { createdAt: -1 as const };
-
-  if (!sortStr) return defaultSort;
-
-  const [field, direction] = sortStr.split(":");
-  if (!field) return defaultSort;
-
-  if (allowedFields.length > 0 && !allowedFields.includes(field)) {
-    return defaultSort;
-  }
-
-  const order = direction === "asc" ? 1 : -1;
-  return { [field]: order as 1 | -1 };
-};
-
-/* ==========================================================================
- *  SECTION 11: STRING UTILITIES
- * ========================================================================== */
-
-/**
- * Converts a title into a URL-friendly slug.
- */
 const slugify = (text: string): string => {
-  return text
-    .toLowerCase()
-    .trim()
+  return text.toLowerCase().trim()
     .replace(/[^a-z0-9\s-]/g, "")
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-")
     .substring(0, 100);
 };
 
-/**
- * Generates a short random ID for tracking.
- */
-const generateRequestId = (): string => {
-  return Math.random().toString(36).substring(2, 10);
-};
-
-/**
- * Truncates text to a max length with ellipsis.
- */
 const truncate = (text: string, maxLen: number = 150): string => {
   return text.length > maxLen ? text.substring(0, maxLen) + "..." : text;
 };
 
+const getPagination = (pageStr?: string, limitStr?: string) => {
+  const page = Math.max(1, parseInt(pageStr || "1", 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(limitStr || "20", 10) || 20));
+  return { page, limit, skip: (page - 1) * limit };
+};
+
+const generateRequestId = (): string =>
+  Math.random().toString(36).substring(2, 10);
+
 /* ==========================================================================
- *  SECTION 12: ACTIVITY LOGGING & NOTIFICATIONS
+ *  SECTION 8: ACTIVITY LOGGING
  * ========================================================================== */
 
-/**
- * Records an activity to the audit trail.
- * Fails silently — never crashes a request.
- */
 async function logActivity(
   req: Request,
   action: string,
@@ -619,15 +318,12 @@ async function logActivity(
       ip: req.ip || null,
       userAgent: req.headers["user-agent"] || null,
       createdAt: new Date(),
-    } as any);
+    });
   } catch (e) {
     console.error("⚠️ Activity log failed:", (e as Error).message);
   }
 }
 
-/**
- * Creates an admin notification. Fails silently.
- */
 async function createNotification(
   title: string,
   message: string,
@@ -641,20 +337,16 @@ async function createNotification(
       type,
       read: false,
       createdAt: new Date(),
-    } as any);
+    });
   } catch (e) {
     console.error("⚠️ Notification failed:", (e as Error).message);
   }
 }
 
 /* ==========================================================================
- *  SECTION 13: BETTER AUTH
+ *  SECTION 9: VERIFICATION EMAIL
  * ========================================================================== */
 
-/**
- * Sends verification email via Resend (if configured).
- * Falls back to console logging in development.
- */
 async function sendVerificationEmail(
   user: { name?: string | null; email: string },
   url: string
@@ -677,7 +369,6 @@ async function sendVerificationEmail(
           html: `<div style="font-family:sans-serif;padding:20px">
             <h2>Verify your email</h2>
             <p>Hello ${safeName},</p>
-            <p>Click below to verify:</p>
             <p><a href="${safeUrl}" style="padding:12px 20px;background:#10b981;color:white;text-decoration:none;border-radius:6px">Verify Email</a></p>
           </div>`,
         }),
@@ -690,134 +381,159 @@ async function sendVerificationEmail(
   }
 }
 
+/* ==========================================================================
+ *  SECTION 10: 🔧 CRITICAL FIX — LAZY BETTER AUTH FACTORY
+ *  ==========================================================================
+ *  
+ *  This is THE fix for the "loading forever" bug.
+ *  
+ *  We CANNOT create betterAuth() at module load because:
+ *  1. On Vercel cold start, MongoDB isn't connected yet
+ *  2. mongodbAdapter needs a REAL Db, not a Proxy
+ *  
+ *  So we create it lazily on first auth request via getAuth().
+ *  The authPromise ensures only ONE instance is created even if 
+ *  multiple requests arrive simultaneously.
+ * ========================================================================== */
+
+type AuthInstance = ReturnType<typeof betterAuth>;
+
+let authInstance: AuthInstance | null = null;
+let authPromise: Promise<AuthInstance> | null = null;
+
 /**
- * Better Auth instance.
+ * Returns the Better Auth instance, creating it lazily on first call.
  * 
- * Note: MongoDB adapter receives a lazy proxy so the actual connection
- * happens on first auth request, not at module load. This is critical
- * for Vercel serverless cold starts.
+ * The promise cache ensures:
+ * - Only ONE auth instance is created even under high concurrency
+ * - Subsequent calls return instantly without re-creating
+ * - Failures reset the cache so retries work
  */
-const auth = betterAuth({
-  secret: process.env.BETTER_AUTH_SECRET!,
-  baseURL: BETTER_AUTH_URL,
-  database: mongodbAdapter(
-    new Proxy({} as Db, {
-      get() {
-        throw new Error("DB not connected — this should not be called directly");
-      },
-    })
-  ),
-  trustedOrigins: [CLIENT_URL, "http://localhost:3000", "http://127.0.0.1:3000"],
-  emailAndPassword: {
-    enabled: true,
-    requireEmailVerification: false,
-    minPasswordLength: 8,
-    autoSignIn: true,
-  },
-  emailVerification: {
-    sendOnSignUp: true,
-    sendOnSignIn: true,
-    autoSignInAfterVerification: true,
-    expiresIn: 3600,
-    sendVerificationEmail: async ({ user, url }) =>
-      await sendVerificationEmail(user, url),
-  },
-  ...(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
-    ? {
-        socialProviders: {
-          google: {
-            clientId: process.env.GOOGLE_CLIENT_ID,
-            clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-            prompt: "select_account" as const,
+function getAuth(): Promise<AuthInstance> {
+  if (authInstance) return Promise.resolve(authInstance);
+
+  if (!authPromise) {
+    authPromise = getDB()
+      .then((db) => {
+        const instance = betterAuth({
+          secret: BETTER_AUTH_SECRET!,
+          baseURL: BETTER_AUTH_URL,
+          // ✅ REAL Db instance — this is the fix
+          database: mongodbAdapter(db),
+          trustedOrigins: [CLIENT_URL, "http://localhost:3000", "http://127.0.0.1:3000"],
+          emailAndPassword: {
+            enabled: true,
+            requireEmailVerification: false,
+            minPasswordLength: 8,
+            autoSignIn: true,
           },
-        },
-      }
-    : {}),
-  account: {
-    accountLinking: { enabled: true, trustedProviders: ["google"] },
-  },
-  logger: { disabled: true },
-  user: {
-    additionalFields: {
-      role: { type: "string", defaultValue: "member", input: false },
-      phone: { type: "string", required: false, defaultValue: "", input: true },
-      address: { type: "string", required: false, defaultValue: "", input: true },
-    },
-  },
-  session: {
-    expiresIn: 60 * 60 * 24 * 7,
-    updateAge: 60 * 60 * 24,
-  },
-  advanced: {
-    defaultCookieAttributes: {
-      sameSite: AUTH_COOKIE_SAME_SITE,
-      secure: IS_PRODUCTION || AUTH_COOKIE_SAME_SITE === "none",
-      httpOnly: true,
-      path: "/",
-    },
-  },
-  /**
-   * Auto-promotes the user whose email matches ADMIN_EMAIL to admin role.
-   * Runs after new user creation only.
-   */
-  databaseHooks: {
-    user: {
-      create: {
-        after: async (user: any) => {
-          if (ADMIN_EMAIL && user.email === ADMIN_EMAIL) {
-            try {
-              const db = await getDB();
-              await db
-                .collection("user")
-                .updateOne({ email: user.email }, { $set: { role: "admin" } });
-              console.log(`👑 Auto-promoted ${user.email} to admin`);
-            } catch (e) {
-              console.error("Auto-promote failed:", e);
-            }
-          }
-        },
-      },
-    },
-  },
-});
+          emailVerification: {
+            sendOnSignUp: true,
+            sendOnSignIn: true,
+            autoSignInAfterVerification: true,
+            expiresIn: 3600,
+            sendVerificationEmail: async ({ user, url }) =>
+              await sendVerificationEmail(user, url),
+          },
+          ...(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
+            ? {
+                socialProviders: {
+                  google: {
+                    clientId: process.env.GOOGLE_CLIENT_ID,
+                    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+                    prompt: "select_account" as const,
+                  },
+                },
+              }
+            : {}),
+          account: {
+            accountLinking: { enabled: true, trustedProviders: ["google"] },
+          },
+          logger: { disabled: true },
+          user: {
+            additionalFields: {
+              role: { type: "string", defaultValue: "member", input: false },
+              phone: { type: "string", required: false, defaultValue: "", input: true },
+              address: { type: "string", required: false, defaultValue: "", input: true },
+            },
+          },
+          session: {
+            expiresIn: 60 * 60 * 24 * 7,
+            updateAge: 60 * 60 * 24,
+          },
+          advanced: {
+            defaultCookieAttributes: {
+              sameSite: AUTH_COOKIE_SAME_SITE,
+              secure: IS_PRODUCTION || AUTH_COOKIE_SAME_SITE === "none",
+              httpOnly: true,
+              path: "/",
+            },
+          },
+          databaseHooks: {
+            user: {
+              create: {
+                after: async (user: any) => {
+                  if (ADMIN_EMAIL && user.email === ADMIN_EMAIL) {
+                    try {
+                      const db = await getDB();
+                      await db.collection("user").updateOne(
+                        { email: user.email },
+                        { $set: { role: "admin" } }
+                      );
+                      console.log(`👑 Auto-promoted ${user.email} to admin`);
+                    } catch (e) {
+                      console.error("Auto-promote failed:", e);
+                    }
+                  }
+                },
+              },
+            },
+          },
+        });
+
+        authInstance = instance;
+        console.log("✅ Better Auth instance created");
+        return instance;
+      })
+      .catch((err) => {
+        authPromise = null;
+        console.error("❌ Better Auth creation failed:", err.message);
+        throw err;
+      });
+  }
+
+  return authPromise;
+}
 
 /* ==========================================================================
- *  SECTION 14: EXPRESS APP & GLOBAL MIDDLEWARE
+ *  SECTION 11: EXPRESS APPLICATION
  * ========================================================================== */
 
 const app = express();
 
 if (IS_PRODUCTION) app.set("trust proxy", 1);
 
-app.use(
-  helmet({
-    crossOriginResourcePolicy: { policy: "cross-origin" },
-    contentSecurityPolicy: false,
-  })
-);
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  contentSecurityPolicy: false,
+}));
 
-const allowedOrigins = new Set([
-  CLIENT_URL,
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
-]);
+const allowedOrigins = new Set([CLIENT_URL, "http://localhost:3000", "http://127.0.0.1:3000"]);
 
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      if (!origin || allowedOrigins.has(origin)) return cb(null, true);
-      return cb(new AppError(`Blocked by CORS: ${origin}`, 403));
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
-    optionsSuccessStatus: 204,
-  })
-);
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin || allowedOrigins.has(origin)) return cb(null, true);
+    return cb(new AppError(`Blocked by CORS: ${origin}`, 403));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+  optionsSuccessStatus: 204,
+}));
 
 app.use(morgan(IS_PRODUCTION ? "combined" : "dev"));
 
-// Request ID + slow request tracking
+// Request ID middleware
 app.use((req, res, next) => {
   (req as any).requestId = generateRequestId();
   res.setHeader("X-Request-ID", (req as any).requestId);
@@ -826,48 +542,53 @@ app.use((req, res, next) => {
   res.on("finish", () => {
     const duration = Date.now() - start;
     if (duration > 1000) {
-      console.warn(
-        `⚠️ Slow: ${req.method} ${req.originalUrl} (${duration}ms)`
-      );
+      console.warn(`⚠️ Slow: ${req.method} ${req.originalUrl} (${duration}ms)`);
     }
   });
   next();
 });
 
 // Rate limiting
-app.use(
-  "/api",
-  rateLimit({
-    windowMs: RATE_LIMIT_WINDOW_MS,
-    max: RATE_LIMIT_MAX,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { success: false, message: "Too many requests" },
-  })
-);
+app.use("/api", rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 2000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "Too many requests" },
+}));
 
-// Better Auth must mount BEFORE body parsers
-app.all("/api/auth/*", toNodeHandler(auth));
+/* ==========================================================================
+ *  SECTION 12: 🔧 AUTH ROUTE (uses lazy getAuth)
+ *  ========================================================================== */
 
-// Body parsers
+// Express 4 wildcard syntax (correct for your version)
+app.all("/api/auth/*", (req, res, next) => {
+  getAuth()
+    .then((auth) => toNodeHandler(auth)(req, res, next))
+    .catch(next);
+});
+
+// Body parsers (must be AFTER auth route)
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 /* ==========================================================================
- *  SECTION 15: FILE UPLOAD (MULTER)
+ *  SECTION 13: FILE UPLOAD
  * ========================================================================== */
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_FILE_SIZE_BYTES, files: 1, fields: 10 },
+  limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 10 },
   fileFilter: (_req, file, cb) => {
-    if (ALLOWED_MIMES.has(file.mimetype)) return cb(null, true);
+    if (["image/jpeg", "image/png", "image/webp"].includes(file.mimetype)) {
+      return cb(null, true);
+    }
     cb(new AppError("Unsupported image type. Use JPG, PNG, or WebP.", 415));
   },
 });
 
 /* ==========================================================================
- *  SECTION 16: AUTH MIDDLEWARE
+ *  SECTION 14: SESSION MIDDLEWARE (uses lazy getAuth)
  * ========================================================================== */
 
 declare global {
@@ -880,23 +601,24 @@ declare global {
   }
 }
 
-app.use(
-  "/api",
-  catchAsync(async (req, _res, next) => {
-    try {
-      const session = await auth.api.getSession({
-        headers: fromNodeHeaders(req.headers),
-      });
-      if (session) {
-        req.user = session.user;
-        req.session = session.session;
-      }
-    } catch {
-      /* Ignore session errors for public routes */
+app.use("/api", catchAsync(async (req, _res, next) => {
+  try {
+    const auth = await getAuth();
+    const session = await auth.api.getSession({
+      headers: fromNodeHeaders(req.headers),
+    });
+    if (session) {
+      req.user = session.user;
+      req.session = session.session;
     }
-    next();
-  })
-);
+  } catch (e) {
+    // Log real errors but don't break public routes
+    if (!IS_PRODUCTION) {
+      console.warn("⚠️ Session lookup failed:", (e as Error).message);
+    }
+  }
+  next();
+}));
 
 const requireAuth = (req: Request, res: Response, next: NextFunction) => {
   if (!req.user) {
@@ -905,69 +627,44 @@ const requireAuth = (req: Request, res: Response, next: NextFunction) => {
   next();
 };
 
-const requireAdmin = catchAsync(
-  async (req: Request, res: Response, next: NextFunction) => {
-    if (!req.user) return next(new AppError("Authentication required.", 401));
-    const col = await usersCol();
-    const dbUser = await col.findOne({ email: req.user.email });
-    if (!dbUser || dbUser.role !== "admin") {
-      return next(new AppError("Admin access required.", 403));
-    }
-    req.user.role = "admin";
-    next();
+const requireAdmin = catchAsync(async (req: Request, res: Response, next: NextFunction) => {
+  if (!req.user) return next(new AppError("Authentication required.", 401));
+  const col = await usersCol();
+  const dbUser = await col.findOne({ email: req.user.email });
+  if (!dbUser || dbUser.role !== "admin") {
+    return next(new AppError("Admin access required.", 403));
   }
-);
+  req.user.role = "admin";
+  next();
+});
 
 /* ==========================================================================
- *  SECTION 17: PREMIUM CSS (MASSIVE)
+ *  SECTION 15: PREMIUM CSS
  * ========================================================================== */
 
 const PREMIUM_CSS = `
 :root {
-  --bg-base: #fafaf9;
-  --bg-soft: #fef2f2;
-  --panel: rgba(255, 255, 255, 0.7);
-  --panel-hover: rgba(255, 255, 255, 0.9);
-  --border: rgba(0, 0, 0, 0.08);
-  --border-strong: rgba(0, 0, 0, 0.15);
-  --text-main: #1c1917;
-  --text-muted: #78716c;
-  --accent: #dc2626;
-  --accent-glow: rgba(220, 38, 38, 0.3);
-  --highlight: #f59e0b;
-  --btn-text: #ffffff;
-  --success: #059669;
-  --danger: #dc2626;
-  --warning: #d97706;
-  --info: #0284c7;
+  --bg-base: #fafaf9; --bg-soft: #fef2f2;
+  --panel: rgba(255, 255, 255, 0.7); --panel-hover: rgba(255, 255, 255, 0.9);
+  --border: rgba(0, 0, 0, 0.08); --border-strong: rgba(0, 0, 0, 0.15);
+  --text-main: #1c1917; --text-muted: #78716c;
+  --accent: #dc2626; --accent-glow: rgba(220, 38, 38, 0.3);
+  --highlight: #f59e0b; --btn-text: #ffffff;
+  --success: #059669; --danger: #dc2626;
   --font: 'Inter', -apple-system, sans-serif;
-  --mono: 'SF Mono', monospace;
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
-  --shadow-2xl: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+  --mono: 'SF Mono', Monaco, monospace;
 }
 .dark {
-  --bg-base: #022c22;
-  --bg-soft: #064e3b;
-  --panel: rgba(255, 255, 255, 0.03);
-  --panel-hover: rgba(255, 255, 255, 0.06);
-  --border: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.15);
-  --text-main: #ecfdf5;
-  --text-muted: #6ee7b7;
-  --accent: #10b981;
-  --accent-glow: rgba(16, 185, 129, 0.4);
-  --highlight: #06b6d4;
-  --btn-text: #000000;
-  --success: #10b981;
-  --danger: #ef4444;
-  --warning: #f59e0b;
-  --info: #3b82f6;
+  --bg-base: #022c22; --bg-soft: #064e3b;
+  --panel: rgba(255, 255, 255, 0.03); --panel-hover: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.08); --border-strong: rgba(255, 255, 255, 0.15);
+  --text-main: #ecfdf5; --text-muted: #6ee7b7;
+  --accent: #10b981; --accent-glow: rgba(16, 185, 129, 0.4);
+  --highlight: #06b6d4; --btn-text: #000000;
+  --success: #10b981; --danger: #ef4444;
 }
 *, *::before, *::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
+  box-sizing: border-box; margin: 0; padding: 0;
   font-family: var(--font);
   transition: background-color 0.3s, border-color 0.3s, color 0.3s;
 }
@@ -975,29 +672,13 @@ body {
   background: var(--bg-base);
   background-image: radial-gradient(circle at top left, var(--bg-soft), var(--bg-base) 70%);
   color: var(--text-main);
-  min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2rem;
-  line-height: 1.6;
-  -webkit-font-smoothing: antialiased;
+  min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  padding: 2rem; line-height: 1.6; -webkit-font-smoothing: antialiased;
 }
 .blob { position: absolute; border-radius: 50%; filter: blur(100px); z-index: -1; opacity: 0.2; pointer-events: none; animation: float 12s infinite ease-in-out alternate; }
 .blob-1 { background: var(--accent); width: 600px; height: 600px; top: -200px; left: -200px; }
 .blob-2 { background: var(--highlight); width: 500px; height: 500px; bottom: -150px; right: -150px; animation-delay: -6s; }
-.container {
-  max-width: 1100px;
-  width: 100%;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 24px;
-  padding: 4rem;
-  backdrop-filter: blur(20px);
-  box-shadow: var(--shadow-2xl), 0 0 60px var(--accent-glow);
-  position: relative;
-  overflow: hidden;
-}
+.container { max-width: 1100px; width: 100%; background: var(--panel); border: 1px solid var(--border); border-radius: 24px; padding: 4rem; backdrop-filter: blur(20px); box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25), 0 0 60px var(--accent-glow); position: relative; overflow: hidden; }
 .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 3rem; gap: 1.5rem; flex-wrap: wrap; }
 .header-left { display: flex; align-items: center; gap: 1.5rem; min-width: 0; }
 .logo { width: 80px; height: 80px; border-radius: 20px; border: 2px solid var(--border); box-shadow: 0 0 20px var(--accent-glow); object-fit: cover; }
@@ -1009,10 +690,10 @@ body {
 .dot { width: 12px; height: 12px; background: var(--accent); border-radius: 50%; box-shadow: 0 0 15px var(--accent); animation: pulse 2s infinite; }
 .dot.danger { background: var(--danger); }
 .dot.success { background: var(--success); }
-.hero-title { font-size: 4rem; font-weight: 800; line-height: 1.1; margin-bottom: 1.5rem; letter-spacing: -2px; }
+.hero-title { font-size: 3.5rem; font-weight: 800; line-height: 1.1; margin-bottom: 1.5rem; letter-spacing: -2px; }
 .highlight { background: linear-gradient(90deg, var(--accent), var(--highlight)); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .hero-desc { font-size: 1.15rem; color: var(--text-muted); line-height: 1.6; margin-bottom: 3rem; max-width: 700px; font-weight: 500; }
-.section-title { font-size: 1.5rem; font-weight: 800; margin: 2rem 0 1.5rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border); }
+.section-title { font-size: 1.5rem; font-weight: 800; margin: 3rem 0 1.5rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border); }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem; margin-bottom: 2rem; }
 .card { background: var(--panel); border: 1px solid var(--border); padding: 2rem; border-radius: 20px; position: relative; overflow: hidden; transition: all 0.3s; }
 .card:hover { transform: translateY(-5px); border-color: var(--accent); box-shadow: 0 20px 40px -10px var(--accent-glow); }
@@ -1027,13 +708,14 @@ body {
 .list { display: flex; flex-direction: column; gap: 0.75rem; margin: 1.5rem 0; }
 .list-item { display: flex; align-items: center; gap: 1rem; padding: 1rem; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; transition: all 0.3s; }
 .list-item:hover { border-color: var(--accent); transform: translateX(4px); }
+.list-content { flex: 1; }
 .list-title { font-weight: 700; margin-bottom: 0.25rem; }
 .list-desc { font-size: 0.85rem; color: var(--text-muted); }
 .badge { display: inline-block; padding: 4px 10px; border-radius: 6px; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; font-family: var(--mono); }
 .badge-get { background: rgba(16, 185, 129, 0.15); color: var(--success); }
-.badge-post { background: rgba(2, 132, 199, 0.15); color: var(--info); }
-.badge-put { background: rgba(217, 119, 6, 0.15); color: var(--warning); }
-.badge-delete { background: rgba(220, 38, 38, 0.15); color: var(--danger); }
+.badge-post { background: rgba(2, 132, 199, 0.15); color: #0284c7; }
+.badge-put { background: rgba(217, 119, 6, 0.15); color: #d97706; }
+.badge-del { background: rgba(220, 38, 38, 0.15); color: var(--danger); }
 .footer { margin-top: 4rem; padding-top: 2rem; border-top: 1px solid var(--border); display: flex; justify-content: space-between; color: var(--text-muted); font-size: 0.95rem; font-weight: 600; flex-wrap: wrap; gap: 1rem; }
 @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.3); } }
 @keyframes float { 0% { transform: translate(0, 0) scale(1); } 50% { transform: translate(40px, -40px) scale(1.05); } 100% { transform: translate(0, 0) scale(1); } }
@@ -1041,7 +723,7 @@ body {
   body { padding: 1rem; }
   .container { padding: 2rem; border-radius: 16px; }
   .header { flex-direction: column; align-items: flex-start; }
-  .hero-title { font-size: 2.5rem; letter-spacing: -1px; }
+  .hero-title { font-size: 2rem; letter-spacing: -1px; }
   .footer { flex-direction: column; text-align: center; }
   .btn { width: 100%; justify-content: center; }
   .grid { grid-template-columns: 1fr; }
@@ -1049,18 +731,12 @@ body {
 `;
 
 /* ==========================================================================
- *  SECTION 18: PREMIUM HTML PAGES
+ *  SECTION 16: ROOT DASHBOARD
  * ========================================================================== */
 
-/**
- * GET / — Root dashboard (server status, uptime, quick links).
- */
 app.get("/", (_req, res) => {
   const uptime = Math.floor(process.uptime());
   const time = new Date().toLocaleTimeString();
-  const safeAdminName = escapeHtml(ADMIN_NAME);
-  const safeClientUrl = escapeHtml(CLIENT_URL);
-  const safeEnv = escapeHtml(process.env.NODE_ENV || "development");
 
   res.send(`<!DOCTYPE html>
 <html lang="en">
@@ -1075,15 +751,15 @@ app.get("/", (_req, res) => {
 <div class="blob blob-1"></div><div class="blob blob-2"></div>
 <div class="container">
 <div class="header">
-<div class="header-left"><img src="${LOGO_URL}" class="logo"><div class="header-text"><h1>Oasis BIAM</h1><p>Enterprise Server</p></div></div>
+<div class="header-left"><img src="${LOGO_URL}" class="logo"><div class="header-text"><h1>Oasis BIAM</h1><p>Enterprise Server v${API_VERSION}</p></div></div>
 <button class="theme-toggle" onclick="document.documentElement.classList.toggle('dark');document.body.classList.toggle('dark')">🌓 Toggle Theme</button>
 </div>
 <div class="status-pill"><div class="dot"></div> All Systems Operational</div>
-<h2 class="hero-title">Hi <span class="highlight">${safeAdminName}</span>,<br>your server is flying.</h2>
+<h2 class="hero-title">Hi <span class="highlight">${escapeHtml(ADMIN_NAME)}</span>,<br>your server is flying.</h2>
 <p class="hero-desc">The Oasis BIAM Enterprise API is securely answering requests. Everything you need to manage the website is live and ready for action.</p>
 <div class="grid">
 <div class="card"><div class="card-label">Server Uptime</div><div class="card-val" style="color:var(--accent)">${uptime}s</div></div>
-<div class="card"><div class="card-label">Environment</div><div class="card-val">${safeEnv}</div></div>
+<div class="card"><div class="card-label">Environment</div><div class="card-val">${escapeHtml(process.env.NODE_ENV || "development")}</div></div>
 <div class="card"><div class="card-label">Platform</div><div class="card-val">${IS_VERCEL ? "Vercel" : "Node.js"}</div></div>
 <div class="card"><div class="card-label">API Version</div><div class="card-val">${API_VERSION}</div></div>
 </div>
@@ -1091,7 +767,7 @@ app.get("/", (_req, res) => {
 <a href="/api/health" class="btn btn-primary">Health Check →</a>
 <a href="/api/home" class="btn btn-outline">API Index</a>
 <a href="/api/docs" class="btn btn-outline">API Docs</a>
-<a href="${safeClientUrl}/dashboard/admin" class="btn btn-outline">Admin Dashboard</a>
+<a href="${escapeHtml(CLIENT_URL)}/dashboard/admin" class="btn btn-outline">Admin Dashboard</a>
 </div>
 <div class="footer"><span>© ${new Date().getFullYear()} Oasis BIAM Laboratory School</span><span>Local Time: ${time}</span></div>
 </div>
@@ -1099,9 +775,10 @@ app.get("/", (_req, res) => {
 </html>`);
 });
 
-/**
- * GET /api/health — System health check (HTML + JSON).
- */
+/* ==========================================================================
+ *  SECTION 17: HEALTH CHECK (hides internal errors in production)
+ * ========================================================================== */
+
 app.get("/api/health", catchAsync(async (req, res) => {
   let dbOk = false;
   let dbError = "";
@@ -1112,12 +789,15 @@ app.get("/api/health", catchAsync(async (req, res) => {
     dbOk = true;
   } catch (e: any) {
     dbError = e.message || "Connection failed";
+    // 🔧 FIX: Log full error server-side, never send to client in production
+    console.error("Health check DB error:", dbError);
   }
 
   const health = {
     status: dbOk ? "ok" : "error",
     db: dbOk ? "connected" : "unreachable",
-    dbError: dbOk ? undefined : dbError,
+    // 🔧 Only show error details in development
+    ...(IS_PRODUCTION ? {} : { dbError: dbOk ? undefined : dbError }),
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
     memory: process.memoryUsage(),
@@ -1139,12 +819,12 @@ app.get("/api/health", catchAsync(async (req, res) => {
 <div class="grid">
 <div class="card"><div class="card-label">API Status</div><div class="card-val" style="color:var(--success)">Online</div></div>
 <div class="card"><div class="card-label">Database</div><div class="card-val" style="color:${dbOk ? 'var(--success)' : 'var(--danger)'}">${dbOk ? 'Connected' : 'Unreachable'}</div></div>
-<div class="card"><div class="card-label">Memory Usage</div><div class="card-val">${memoryUsed} MB</div></div>
+<div class="card"><div class="card-label">Memory</div><div class="card-val">${memoryUsed} MB</div></div>
 <div class="card"><div class="card-label">Uptime</div><div class="card-val">${Math.floor(health.uptime)}s</div></div>
 <div class="card"><div class="card-label">Platform</div><div class="card-val">${health.platform}</div></div>
-<div class="card"><div class="card-label">API Version</div><div class="card-val">${health.version}</div></div>
+<div class="card"><div class="card-label">Version</div><div class="card-val">${health.version}</div></div>
 </div>
-${!dbOk ? `<div class="card" style="border-color:var(--danger)"><div class="card-label">Database Error</div><div class="card-val" style="font-size:1rem;color:var(--danger)">${escapeHtml(dbError)}</div></div>` : ''}
+${!dbOk && !IS_PRODUCTION ? `<div class="card" style="border-color:var(--danger)"><div class="card-label">DB Error (dev only)</div><div class="card-val" style="font-size:1rem;color:var(--danger)">${escapeHtml(dbError)}</div></div>` : ''}
 <div class="actions"><a href="/" class="btn btn-primary">← Back Home</a></div>
 </div>
 </body>
@@ -1154,10 +834,11 @@ ${!dbOk ? `<div class="card" style="border-color:var(--danger)"><div class="card
   res.status(dbOk ? 200 : 503).json({ success: dbOk, data: health });
 }));
 
-/**
- * GET /api/home — Homepage data aggregator.
- */
-app.get("/api/home", catchAsync(async (req, res) => {
+/* ==========================================================================
+ *  SECTION 18: HOME AGGREGATOR
+ * ========================================================================== */
+
+app.get("/api/home", catchAsync(async (_req, res) => {
   const [tCol, gCol, aCol, nCol, eCol] = await Promise.all([
     teachersCol(), governingCol(), articlesCol(), noticesCol(), eventsCol(),
   ]);
@@ -1172,99 +853,72 @@ app.get("/api/home", catchAsync(async (req, res) => {
     eCol.find({}).sort({ date: 1 }).limit(3).toArray(),
   ]);
 
-  const data = {
+  ok(res, {
     hero: { slides: HERO_SLIDES, logo: LOGO_URL },
     principal, vicePrincipal, chairman, teachers,
     latestArticles: articles,
     latestNotices: notices,
     upcomingEvents,
-  };
-
-  if (req.headers.accept?.includes("text/html")) {
-    const noticesHtml = notices.length
-      ? notices.map(n => `<div class="card"><div class="card-label">${escapeHtml(n.category || "General")}</div><div class="card-val" style="font-size:1.1rem">${escapeHtml(n.title)}</div></div>`).join("")
-      : `<div class="card"><div class="card-label">No Data</div><div class="card-val">No notices yet</div></div>`;
-
-    const articlesHtml = articles.length
-      ? articles.map(a => `<div class="card"><div class="card-label">${escapeHtml(a.category || "General")}</div><div class="card-val" style="font-size:1.1rem">${escapeHtml(a.title)}</div></div>`).join("")
-      : `<div class="card"><div class="card-label">No Data</div><div class="card-val">No articles yet</div></div>`;
-
-    const eventsHtml = upcomingEvents.length
-      ? upcomingEvents.map(e => `<div class="card"><div class="card-label">${escapeHtml(e.category || "Event")} · ${escapeHtml(e.date)}</div><div class="card-val" style="font-size:1.1rem">${escapeHtml(e.title)}</div></div>`).join("")
-      : `<div class="card"><div class="card-label">No Data</div><div class="card-val">No upcoming events</div></div>`;
-
-    return res.send(`<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><title>API Index | Oasis BIAM</title><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"><style>${PREMIUM_CSS}</style></head>
-<body>
-<div class="blob blob-1"></div><div class="blob blob-2"></div>
-<div class="container">
-<div class="header"><div class="header-left"><img src="${LOGO_URL}" class="logo"><div class="header-text"><h1>API Index</h1><p>Home Aggregate</p></div></div><button class="theme-toggle" onclick="document.documentElement.classList.toggle('dark');document.body.classList.toggle('dark')">🌓 Toggle</button></div>
-<h2 class="section-title">Latest Notices</h2>
-<div class="grid">${noticesHtml}</div>
-<h2 class="section-title">Latest Articles</h2>
-<div class="grid">${articlesHtml}</div>
-<h2 class="section-title">Upcoming Events</h2>
-<div class="grid">${eventsHtml}</div>
-<div class="actions"><a href="/" class="btn btn-primary">← Back Home</a></div>
-</div>
-</body>
-</html>`);
-  }
-
-  res.json({ success: true, data });
+  });
 }));
 
-/**
- * GET /api/docs — API documentation page.
- */
+/* ==========================================================================
+ *  SECTION 19: API DOCS
+ * ========================================================================== */
+
 app.get("/api/docs", (_req, res) => {
   const endpoints = [
     { method: "GET", path: "/api/health", desc: "System health check" },
     { method: "GET", path: "/api/home", desc: "Homepage aggregate" },
     { method: "GET", path: "/api/stats", desc: "Platform statistics" },
-    { method: "GET", path: "/api/config/auth", desc: "Auth configuration" },
     { method: "GET", path: "/api/settings", desc: "Global settings" },
     { method: "PUT", path: "/api/settings", desc: "Update settings (admin)" },
-    { method: "GET", path: "/api/users/me", desc: "Current user" },
+    { method: "GET", path: "/api/users/me", desc: "Current user profile" },
     { method: "GET", path: "/api/users", desc: "List users (admin)" },
-    { method: "POST", path: "/api/users/:id/make-admin", desc: "Promote (admin)" },
-    { method: "POST", path: "/api/users/:id/make-member", desc: "Demote (admin)" },
+    { method: "POST", path: "/api/users/:id/make-admin", desc: "Promote user (admin)" },
+    { method: "POST", path: "/api/users/:id/make-member", desc: "Demote user (admin)" },
     { method: "DELETE", path: "/api/users/:id", desc: "Delete user (admin)" },
     { method: "GET", path: "/api/notices", desc: "List notices" },
+    { method: "GET", path: "/api/notices/:id", desc: "Get notice" },
     { method: "POST", path: "/api/notices", desc: "Create notice (admin)" },
     { method: "PATCH", path: "/api/notices/:id", desc: "Update notice (admin)" },
     { method: "DELETE", path: "/api/notices/:id", desc: "Delete notice (admin)" },
     { method: "GET", path: "/api/articles", desc: "List articles" },
+    { method: "GET", path: "/api/articles/:id", desc: "Get article" },
     { method: "GET", path: "/api/articles/slug/:slug", desc: "Article by slug" },
     { method: "POST", path: "/api/articles", desc: "Create article (admin)" },
     { method: "PATCH", path: "/api/articles/:id", desc: "Update article (admin)" },
     { method: "DELETE", path: "/api/articles/:id", desc: "Delete article (admin)" },
     { method: "GET", path: "/api/teachers", desc: "List faculty" },
+    { method: "GET", path: "/api/teachers/:id", desc: "Get teacher" },
     { method: "POST", path: "/api/teachers", desc: "Add faculty (admin)" },
     { method: "PATCH", path: "/api/teachers/:id", desc: "Update faculty (admin)" },
     { method: "DELETE", path: "/api/teachers/:id", desc: "Delete faculty (admin)" },
     { method: "GET", path: "/api/governing-body", desc: "List governing body" },
+    { method: "GET", path: "/api/governing-body/:id", desc: "Get member" },
     { method: "POST", path: "/api/governing-body", desc: "Add member (admin)" },
     { method: "DELETE", path: "/api/governing-body/:id", desc: "Remove member (admin)" },
     { method: "GET", path: "/api/gallery", desc: "List gallery" },
     { method: "POST", path: "/api/gallery", desc: "Add image (admin)" },
     { method: "DELETE", path: "/api/gallery/:id", desc: "Delete image (admin)" },
     { method: "GET", path: "/api/events", desc: "List events" },
+    { method: "GET", path: "/api/events/:id", desc: "Get event" },
     { method: "POST", path: "/api/events", desc: "Create event (admin)" },
     { method: "PATCH", path: "/api/events/:id", desc: "Update event (admin)" },
     { method: "DELETE", path: "/api/events/:id", desc: "Delete event (admin)" },
     { method: "GET", path: "/api/achievements", desc: "List achievements" },
+    { method: "GET", path: "/api/achievements/:id", desc: "Get achievement" },
     { method: "POST", path: "/api/achievements", desc: "Add achievement (admin)" },
+    { method: "PATCH", path: "/api/achievements/:id", desc: "Update achievement (admin)" },
     { method: "DELETE", path: "/api/achievements/:id", desc: "Delete achievement (admin)" },
+    { method: "POST", path: "/api/contacts", desc: "Submit contact message" },
     { method: "GET", path: "/api/contacts", desc: "List messages (admin)" },
-    { method: "POST", path: "/api/contacts", desc: "Submit message" },
     { method: "PATCH", path: "/api/contacts/:id", desc: "Update status (admin)" },
-    { method: "DELETE", path: "/api/contacts/:id", desc: "Delete (admin)" },
-    { method: "GET", path: "/api/admissions", desc: "List applications (admin)" },
+    { method: "DELETE", path: "/api/contacts/:id", desc: "Delete message (admin)" },
     { method: "POST", path: "/api/admissions", desc: "Submit application" },
+    { method: "GET", path: "/api/admissions", desc: "List applications (admin)" },
     { method: "PATCH", path: "/api/admissions/:id", desc: "Update status (admin)" },
-    { method: "DELETE", path: "/api/admissions/:id", desc: "Delete (admin)" },
+    { method: "DELETE", path: "/api/admissions/:id", desc: "Delete application (admin)" },
     { method: "GET", path: "/api/notifications", desc: "Admin notifications" },
     { method: "GET", path: "/api/activity", desc: "Activity log (admin)" },
     { method: "GET", path: "/api/search?q=query", desc: "Cross-collection search" },
@@ -1272,9 +926,11 @@ app.get("/api/docs", (_req, res) => {
     { method: "POST", path: "/api/upload", desc: "Upload image (admin)" },
   ];
 
-  const rows = endpoints.map(e => {
-    const badgeClass = e.method === "GET" ? "badge-get" : e.method === "POST" ? "badge-post" : e.method === "PUT" || e.method === "PATCH" ? "badge-put" : "badge-delete";
-    return `<div class="list-item"><span class="badge ${badgeClass}">${e.method}</span><div class="list-content"><div class="list-title" style="font-family:var(--mono);font-size:0.9rem">${escapeHtml(e.path)}</div><div class="list-desc">${escapeHtml(e.desc)}</div></div></div>`;
+  const rows = endpoints.map((e) => {
+    const cls = e.method === "GET" ? "badge-get" :
+                e.method === "POST" ? "badge-post" :
+                e.method === "PUT" || e.method === "PATCH" ? "badge-put" : "badge-del";
+    return `<div class="list-item"><span class="badge ${cls}">${e.method}</span><div class="list-content"><div class="list-title" style="font-family:var(--mono);font-size:0.9rem">${escapeHtml(e.path)}</div><div class="list-desc">${escapeHtml(e.desc)}</div></div></div>`;
   }).join("");
 
   res.send(`<!DOCTYPE html>
@@ -1285,17 +941,15 @@ app.get("/api/docs", (_req, res) => {
 <div class="container">
 <div class="header"><div class="header-left"><img src="${LOGO_URL}" class="logo"><div class="header-text"><h1>API Documentation</h1><p>v${API_VERSION} · ${endpoints.length} endpoints</p></div></div><button class="theme-toggle" onclick="document.documentElement.classList.toggle('dark');document.body.classList.toggle('dark')">🌓 Toggle</button></div>
 <div class="status-pill"><div class="dot"></div> All Systems Operational</div>
-<h2 class="section-title">All Endpoints</h2>
 <div class="list">${rows}</div>
 <div class="actions"><a href="/" class="btn btn-primary">← Back Home</a><a href="/api/health" class="btn btn-outline">Health Check</a></div>
-<div class="footer"><span>© ${new Date().getFullYear()} Oasis BIAM Laboratory School</span><span>Powered by Node.js + MongoDB</span></div>
 </div>
 </body>
 </html>`);
 });
 
 /* ==========================================================================
- *  SECTION 19: CONFIG & STATS
+ *  SECTION 20: CONFIG & STATS
  * ========================================================================== */
 
 app.get("/api/config/auth", catchAsync(async (_req, res) => {
@@ -1315,20 +969,15 @@ app.get("/api/stats", catchAsync(async (_req, res) => {
     contactsCol(), galleryCol(), eventsCol(), achievementsCol(), usersCol(),
   ]);
 
-  const [
-    articlesCount, noticesCount, teachersCount, pendingAdmissions,
-    unreadMessages, galleryCount, eventsCount, achievementsCount, totalUsers,
-  ] = await Promise.all([
-    aCol.countDocuments(),
-    nCol.countDocuments(),
-    tCol.countDocuments(),
-    adCol.countDocuments({ status: "pending" }),
-    cCol.countDocuments({ status: "new" }),
-    gCol.countDocuments(),
-    eCol.countDocuments(),
-    achCol.countDocuments(),
-    uCol.countDocuments(),
-  ]);
+  const [articlesCount, noticesCount, teachersCount, pendingAdmissions,
+         unreadMessages, galleryCount, eventsCount, achievementsCount, totalUsers] =
+    await Promise.all([
+      aCol.countDocuments(), nCol.countDocuments(), tCol.countDocuments(),
+      adCol.countDocuments({ status: "pending" }),
+      cCol.countDocuments({ status: "new" }),
+      gCol.countDocuments(), eCol.countDocuments(),
+      achCol.countDocuments(), uCol.countDocuments(),
+    ]);
 
   ok(res, {
     students: 1250, years: 21, library: 5000,
@@ -1338,7 +987,7 @@ app.get("/api/stats", catchAsync(async (_req, res) => {
 }));
 
 /* ==========================================================================
- *  SECTION 20: SETTINGS
+ *  SECTION 21: SETTINGS
  * ========================================================================== */
 
 app.get("/api/settings", catchAsync(async (_req, res) => {
@@ -1367,7 +1016,7 @@ app.put("/api/settings", requireAdmin, catchAsync(async (req, res) => {
 }));
 
 /* ==========================================================================
- *  SECTION 21: USERS
+ *  SECTION 22: USERS
  * ========================================================================== */
 
 app.get("/api/users/me", requireAuth, catchAsync(async (req, res) => {
@@ -1385,7 +1034,7 @@ app.get("/api/users", requireAdmin, catchAsync(async (req, res) => {
   const users = await col.find({}).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray();
   paginated(
     res,
-    users.map(u => { const { password, ...safe } = u as any; return safe; }),
+    users.map((u: any) => { const { password, ...s } = u; return s; }),
     page, limit, total
   );
 }));
@@ -1401,7 +1050,7 @@ app.post("/api/users/:id/make-member", requireAdmin, catchAsync(async (req, res)
   const col = await usersCol();
   const target = await col.findOne({ _id: parseId(req.params.id) });
   if (!target) throw new AppError("User not found", 404);
-  if (target.email === req.user!.email) throw new AppError("Cannot demote yourself", 400);
+  if ((target as any).email === req.user!.email) throw new AppError("Cannot demote yourself", 400);
   await col.updateOne({ _id: parseId(req.params.id) }, { $set: { role: "member" } });
   await logActivity(req, "user.demote", "user", req.params.id);
   msg(res, "User demoted");
@@ -1411,21 +1060,21 @@ app.delete("/api/users/:id", requireAdmin, catchAsync(async (req, res) => {
   const col = await usersCol();
   const target = await col.findOne({ _id: parseId(req.params.id) });
   if (!target) throw new AppError("User not found", 404);
-  if (target.email === req.user!.email) throw new AppError("Cannot delete yourself", 400);
+  if ((target as any).email === req.user!.email) throw new AppError("Cannot delete yourself", 400);
   await col.deleteOne({ _id: parseId(req.params.id) });
   await logActivity(req, "user.delete", "user", req.params.id);
   msg(res, "User deleted");
 }));
 
 /* ==========================================================================
- *  SECTION 22: NOTICES
+ *  SECTION 23: NOTICES (Full CRUD)
  * ========================================================================== */
 
 app.get("/api/notices", catchAsync(async (req, res) => {
   const col = await noticesCol();
   const { skip, limit, page } = getPagination(req.query.page as string, req.query.limit as string);
-  const filter: Filter<NoticeDoc> = {};
-  if (req.query.category) filter.category = req.query.category as string;
+  const filter: Filter<Document> = {};
+  if (req.query.category) filter.category = req.query.category;
   if (req.query.featured === "true") filter.featured = true;
   const total = await col.countDocuments(filter);
   const data = await col.find(filter).sort({ featured: -1, createdAt: -1 }).skip(skip).limit(limit).toArray();
@@ -1452,7 +1101,7 @@ app.post("/api/notices", requireAdmin, catchAsync(async (req, res) => {
     createdAt: new Date(),
     updatedAt: new Date(),
   };
-  const result = await col.insertOne(doc as any);
+  const result = await col.insertOne(doc);
   await logActivity(req, "notice.create", "notice", result.insertedId.toString());
   ok(res, { _id: result.insertedId, ...doc }, 201);
 }));
@@ -1479,14 +1128,14 @@ app.delete("/api/notices/:id", requireAdmin, catchAsync(async (req, res) => {
 }));
 
 /* ==========================================================================
- *  SECTION 23: ARTICLES
+ *  SECTION 24: ARTICLES (Full CRUD)
  * ========================================================================== */
 
 app.get("/api/articles", catchAsync(async (req, res) => {
   const col = await articlesCol();
   const { skip, limit, page } = getPagination(req.query.page as string, req.query.limit as string);
-  const filter: Filter<ArticleDoc> = {};
-  if (req.query.category) filter.category = req.query.category as string;
+  const filter: Filter<Document> = {};
+  if (req.query.category) filter.category = req.query.category;
   const total = await col.countDocuments(filter);
   const data = await col.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray();
   paginated(res, data, page, limit, total);
@@ -1525,7 +1174,7 @@ app.post("/api/articles", requireAdmin, catchAsync(async (req, res) => {
     createdAt: new Date(),
     updatedAt: new Date(),
   };
-  const result = await col.insertOne(doc as any);
+  const result = await col.insertOne(doc);
   await logActivity(req, "article.create", "article", result.insertedId.toString());
   ok(res, { _id: result.insertedId, ...doc }, 201);
 }));
@@ -1553,15 +1202,14 @@ app.delete("/api/articles/:id", requireAdmin, catchAsync(async (req, res) => {
 }));
 
 /* ==========================================================================
- *  SECTION 24: TEACHERS
+ *  SECTION 25: TEACHERS (Full CRUD)
  * ========================================================================== */
 
 app.get("/api/teachers", catchAsync(async (req, res) => {
   const col = await teachersCol();
-  const filter: Filter<TeacherDoc> = {};
-  if (req.query.role) filter.role = req.query.role as any;
-  const data = await col.find(filter).sort({ order: 1, createdAt: -1 }).toArray();
-  ok(res, data);
+  const filter: Filter<Document> = {};
+  if (req.query.role) filter.role = req.query.role;
+  ok(res, await col.find(filter).sort({ order: 1, createdAt: -1 }).toArray());
 }));
 
 app.get("/api/teachers/:id", catchAsync(async (req, res) => {
@@ -1576,7 +1224,7 @@ app.post("/api/teachers", requireAdmin, catchAsync(async (req, res) => {
   const col = await teachersCol();
   const doc = {
     name: cleanString(req.body.name),
-    role: cleanString(req.body.role, "teacher") as any,
+    role: cleanString(req.body.role, "teacher"),
     designation: cleanString(req.body.designation, "Teacher"),
     subject: cleanString(req.body.subject),
     image: req.body.image || null,
@@ -1589,7 +1237,7 @@ app.post("/api/teachers", requireAdmin, catchAsync(async (req, res) => {
     createdAt: new Date(),
     updatedAt: new Date(),
   };
-  const result = await col.insertOne(doc as any);
+  const result = await col.insertOne(doc);
   await logActivity(req, "teacher.create", "teacher", result.insertedId.toString());
   ok(res, { _id: result.insertedId, ...doc }, 201);
 }));
@@ -1616,7 +1264,7 @@ app.delete("/api/teachers/:id", requireAdmin, catchAsync(async (req, res) => {
 }));
 
 /* ==========================================================================
- *  SECTION 25: GOVERNING BODY
+ *  SECTION 26: GOVERNING BODY
  * ========================================================================== */
 
 app.get("/api/governing-body", catchAsync(async (_req, res) => {
@@ -1646,7 +1294,7 @@ app.post("/api/governing-body", requireAdmin, catchAsync(async (req, res) => {
     createdAt: new Date(),
     updatedAt: new Date(),
   };
-  const result = await col.insertOne(doc as any);
+  const result = await col.insertOne(doc);
   await logActivity(req, "governingBody.create", "governingBody", result.insertedId.toString());
   ok(res, { _id: result.insertedId, ...doc }, 201);
 }));
@@ -1659,7 +1307,7 @@ app.delete("/api/governing-body/:id", requireAdmin, catchAsync(async (req, res) 
 }));
 
 /* ==========================================================================
- *  SECTION 26: GALLERY
+ *  SECTION 27: GALLERY
  * ========================================================================== */
 
 app.get("/api/gallery", catchAsync(async (req, res) => {
@@ -1680,7 +1328,7 @@ app.post("/api/gallery", requireAdmin, catchAsync(async (req, res) => {
     category: cleanString(req.body.category, "General"),
     createdAt: new Date(),
   };
-  const result = await col.insertOne(doc as any);
+  const result = await col.insertOne(doc);
   await logActivity(req, "gallery.create", "gallery", result.insertedId.toString());
   ok(res, { _id: result.insertedId, ...doc }, 201);
 }));
@@ -1693,7 +1341,7 @@ app.delete("/api/gallery/:id", requireAdmin, catchAsync(async (req, res) => {
 }));
 
 /* ==========================================================================
- *  SECTION 27: EVENTS
+ *  SECTION 28: EVENTS
  * ========================================================================== */
 
 app.get("/api/events", catchAsync(async (_req, res) => {
@@ -1722,7 +1370,7 @@ app.post("/api/events", requireAdmin, catchAsync(async (req, res) => {
     createdAt: new Date(),
     updatedAt: new Date(),
   };
-  const result = await col.insertOne(doc as any);
+  const result = await col.insertOne(doc);
   await logActivity(req, "event.create", "event", result.insertedId.toString());
   ok(res, { _id: result.insertedId, ...doc }, 201);
 }));
@@ -1749,7 +1397,7 @@ app.delete("/api/events/:id", requireAdmin, catchAsync(async (req, res) => {
 }));
 
 /* ==========================================================================
- *  SECTION 28: ACHIEVEMENTS
+ *  SECTION 29: ACHIEVEMENTS
  * ========================================================================== */
 
 app.get("/api/achievements", catchAsync(async (req, res) => {
@@ -1779,7 +1427,7 @@ app.post("/api/achievements", requireAdmin, catchAsync(async (req, res) => {
     createdAt: new Date(),
     updatedAt: new Date(),
   };
-  const result = await col.insertOne(doc as any);
+  const result = await col.insertOne(doc);
   await logActivity(req, "achievement.create", "achievement", result.insertedId.toString());
   ok(res, { _id: result.insertedId, ...doc }, 201);
 }));
@@ -1805,7 +1453,7 @@ app.delete("/api/achievements/:id", requireAdmin, catchAsync(async (req, res) =>
 }));
 
 /* ==========================================================================
- *  SECTION 29: CONTACTS
+ *  SECTION 30: CONTACTS
  * ========================================================================== */
 
 app.post("/api/contacts", catchAsync(async (req, res) => {
@@ -1817,11 +1465,11 @@ app.post("/api/contacts", catchAsync(async (req, res) => {
     phone: cleanString(req.body.phone),
     subject: cleanString(req.body.subject),
     message: sanitizeInput(cleanString(req.body.message)),
-    status: "new" as const,
+    status: "new",
     createdAt: new Date(),
     updatedAt: new Date(),
   };
-  await col.insertOne(doc as any);
+  await col.insertOne(doc);
   await createNotification("New Contact Message", `${doc.name} sent a message.`);
   msg(res, "Message sent successfully", 201);
 }));
@@ -1829,8 +1477,8 @@ app.post("/api/contacts", catchAsync(async (req, res) => {
 app.get("/api/contacts", requireAdmin, catchAsync(async (req, res) => {
   const col = await contactsCol();
   const { skip, limit, page } = getPagination(req.query.page as string, req.query.limit as string);
-  const filter: Filter<ContactDoc> = {};
-  if (req.query.status) filter.status = req.query.status as any;
+  const filter: Filter<Document> = {};
+  if (req.query.status) filter.status = req.query.status;
   const total = await col.countDocuments(filter);
   const data = await col.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray();
   paginated(res, data, page, limit, total);
@@ -1854,7 +1502,7 @@ app.delete("/api/contacts/:id", requireAdmin, catchAsync(async (req, res) => {
 }));
 
 /* ==========================================================================
- *  SECTION 30: ADMISSIONS
+ *  SECTION 31: ADMISSIONS
  * ========================================================================== */
 
 app.post("/api/admissions", catchAsync(async (req, res) => {
@@ -1872,26 +1520,25 @@ app.post("/api/admissions", catchAsync(async (req, res) => {
     email: cleanString(req.body.email),
     currentAddress: cleanString(req.body.currentAddress),
     permanentAddress: cleanString(req.body.permanentAddress),
-    status: "pending" as const,
+    status: "pending",
     createdAt: new Date(),
     updatedAt: new Date(),
   };
-  await col.insertOne(doc as any);
+  await col.insertOne(doc);
   await createNotification("New Admission", `${doc.studentName} applied for ${doc.classApplyingFor}.`);
   msg(res, "Application submitted successfully", 201);
 }));
 
 app.get("/api/admissions", requireAdmin, catchAsync(async (req, res) => {
   const col = await admissionsCol();
-  const filter: Filter<AdmissionDoc> = {};
-  if (req.query.status) filter.status = req.query.status as any;
-  const data = await col.find(filter).sort({ createdAt: -1 }).toArray();
-  ok(res, data);
+  const filter: Filter<Document> = {};
+  if (req.query.status) filter.status = req.query.status;
+  ok(res, await col.find(filter).sort({ createdAt: -1 }).toArray());
 }));
 
 app.patch("/api/admissions/:id", requireAdmin, catchAsync(async (req, res) => {
   if (!["pending", "approved", "rejected"].includes(req.body.status)) {
-    throw new AppError("Invalid status", 400);
+    throw new AppError("Invalid status. Must be pending, approved, or rejected.", 400);
   }
   const col = await admissionsCol();
   const result = await col.updateOne(
@@ -1911,7 +1558,7 @@ app.delete("/api/admissions/:id", requireAdmin, catchAsync(async (req, res) => {
 }));
 
 /* ==========================================================================
- *  SECTION 31: NOTIFICATIONS
+ *  SECTION 32: NOTIFICATIONS
  * ========================================================================== */
 
 app.get("/api/notifications", requireAdmin, catchAsync(async (req, res) => {
@@ -1936,7 +1583,7 @@ app.delete("/api/notifications/:id", requireAdmin, catchAsync(async (req, res) =
 }));
 
 /* ==========================================================================
- *  SECTION 32: ACTIVITY LOG
+ *  SECTION 33: ACTIVITY LOG
  * ========================================================================== */
 
 app.get("/api/activity", requireAdmin, catchAsync(async (req, res) => {
@@ -1948,19 +1595,17 @@ app.get("/api/activity", requireAdmin, catchAsync(async (req, res) => {
 }));
 
 /* ==========================================================================
- *  SECTION 33: ADVANCED SEARCH
+ *  SECTION 34: SEARCH
  * ========================================================================== */
 
 app.get("/api/search", catchAsync(async (req, res) => {
   const q = String(req.query.q || "").trim();
   if (!q) {
-    const empty: SearchResults = {
-      teachers: [], articles: [], notices: [], events: [],
-      query: "", counts: { teachers: 0, articles: 0, notices: 0, events: 0 },
-    };
-    return ok(res, empty);
+    return ok(res, {
+      teachers: [], articles: [], notices: [], events: [], query: "",
+      counts: { teachers: 0, articles: 0, notices: 0, events: 0 },
+    });
   }
-
   const safeRegex = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
 
   const [tCol, aCol, nCol, eCol] = await Promise.all([
@@ -1982,18 +1627,20 @@ app.get("/api/search", catchAsync(async (req, res) => {
       notices: notices.length,
       events: events.length,
     },
-  } as SearchResults);
+  });
 }));
 
 /* ==========================================================================
- *  SECTION 34: EXPORT / BACKUP
+ *  SECTION 35: EXPORT
  * ========================================================================== */
 
 const EXPORTABLE = ["notices", "articles", "teachers", "governingBody", "gallery", "events", "achievements", "admissions", "contacts"];
 
 app.get("/api/export/:collection", requireAdmin, catchAsync(async (req, res) => {
   const name = req.params.collection;
-  if (!EXPORTABLE.includes(name)) throw new AppError(`Collection not exportable: ${name}`, 400);
+  if (!EXPORTABLE.includes(name)) {
+    throw new AppError(`Collection not exportable: ${name}`, 400);
+  }
   const db = await getDB();
   const data = await db.collection(name).find({}).toArray();
   res.setHeader("Content-Disposition", `attachment; filename="${name}-${Date.now()}.json"`);
@@ -2002,7 +1649,7 @@ app.get("/api/export/:collection", requireAdmin, catchAsync(async (req, res) => 
 }));
 
 /* ==========================================================================
- *  SECTION 35: UPLOAD (IMGBB)
+ *  SECTION 36: UPLOAD
  * ========================================================================== */
 
 app.post("/api/upload", requireAdmin, upload.single("image"), catchAsync(async (req, res) => {
@@ -2036,7 +1683,7 @@ app.post("/api/upload", requireAdmin, upload.single("image"), catchAsync(async (
 }));
 
 /* ==========================================================================
- *  SECTION 36: GLOBAL ERROR HANDLING
+ *  SECTION 37: GLOBAL ERROR HANDLING
  * ========================================================================== */
 
 app.use((req, res, next) =>
@@ -2047,16 +1694,25 @@ app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
   const statusCode = err.statusCode || 500;
   const message = err.isOperational ? err.message : "Internal Server Error";
 
+  // HTML error page for browser requests
   if (req.headers.accept?.includes("text/html") && !req.path.startsWith("/api")) {
     const title = statusCode === 404 ? "Page Not Found" : "Server Error";
     return res.status(statusCode).send(`<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><title>${title} | Oasis BIAM</title><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"><style>${PREMIUM_CSS}</style></head>
-<body><div class="blob blob-1"></div><div class="container"><div class="header"><div class="header-left"><img src="${LOGO_URL}" class="logo"><div class="header-text"><h1>${title}</h1><p>Error ${statusCode}</p></div></div><button class="theme-toggle" onclick="document.documentElement.classList.toggle('dark');document.body.classList.toggle('dark')">🌓 Toggle</button></div><h2 class="hero-title"><span class="highlight">${statusCode}</span></h2><p class="hero-desc">${escapeHtml(message)}</p><div class="actions"><a href="/" class="btn btn-primary">← Back Home</a></div></div></body>
+<body>
+<div class="blob blob-1"></div>
+<div class="container">
+<div class="header"><div class="header-left"><img src="${LOGO_URL}" class="logo"><div class="header-text"><h1>${title}</h1><p>Error ${statusCode}</p></div></div><button class="theme-toggle" onclick="document.documentElement.classList.toggle('dark');document.body.classList.toggle('dark')">🌓 Toggle</button></div>
+<h2 class="hero-title"><span class="highlight">${statusCode}</span></h2>
+<p class="hero-desc">${escapeHtml(message)}</p>
+<div class="actions"><a href="/" class="btn btn-primary">← Back Home</a></div>
+</div>
+</body>
 </html>`);
   }
 
-  console.error(`🔥 [${statusCode}]`, err.message);
+  console.error(`🔥 [${statusCode}] ${req.method} ${req.originalUrl}:`, err.message);
 
   if (IS_PRODUCTION) {
     res.status(statusCode).json({
@@ -2075,13 +1731,13 @@ app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
 });
 
 /* ==========================================================================
- *  SECTION 37: EXPORT & STARTUP
+ *  SECTION 38: EXPORT & STARTUP
  * ========================================================================== */
 
-// 🔧 CRITICAL: ESM export (package.json has "type": "module")
+// 🔧 ESM export (your package.json has "type": "module")
 export default app;
 
-// Only run app.listen() when NOT on Vercel
+// Only listen when NOT on Vercel (Vercel uses the export)
 if (!IS_VERCEL) {
   getDB()
     .then(() => {
@@ -2091,11 +1747,16 @@ if (!IS_VERCEL) {
         console.log(`🌐 Client URL    → ${CLIENT_URL}`);
         console.log(`🔐 Auth URL      → ${BETTER_AUTH_URL}`);
         console.log(`✅ Environment   → ${process.env.NODE_ENV || "development"}`);
+        console.log(`📦 API Version   → ${API_VERSION}`);
         console.log("──────────────────────────────────────────────");
       });
     })
     .catch((err) => {
-      console.error("❌ Startup failed:", err.message);
-      // Don't process.exit() — let Vercel retry on next request
+      console.error("❌ Startup DB connection failed:", err.message);
+      console.error("   Server will retry on first request");
+      // Start server anyway — will respond with 503 on DB-dependent routes
+      app.listen(PORT, () => {
+        console.log(`⚠️ Server running (DB disconnected) on port ${PORT}`);
+      });
     });
 }
