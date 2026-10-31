@@ -6,18 +6,16 @@
  *  Architecture: Monolithic SaaS Backend (Vercel Serverless + Express + MongoDB)
  *  
  *  FEATURES:
+ *  ✅ Zero Fake Data (No seeding) 
+ *  ✅ Auto-Promote SPECIFIC ADMIN_EMAIL to admin via Better Auth hooks
  *  ✅ Full CRUD + Bulk operations for 13 MongoDB collections
- *  ✅ Advanced search, filtering, pagination on all endpoints
- *  ✅ Complete analytics + statistics + activity log
- *  ✅ CSV/JSON data exports for portability
- *  ✅ Better Auth (Email/Password + Google OAuth + Email Verification)
+ *  ✅ Advanced search, filtering, pagination
+ *  ✅ Complete analytics + activity log
+ *  ✅ Better Auth (Email/Password + Google OAuth)
  *  ✅ ImgBB image upload with 45s timeout and 5MB limit
- *  ✅ 6 Premium branded HTML pages (/, /health, /home, /404, /500, /docs)
+ *  ✅ Premium branded HTML pages (/, /health, /home, /404, /500, /docs)
  *  ✅ Vercel Serverless-optimized (maxPoolSize: 1, export default app)
  *  ✅ Comprehensive error handling, rate limiting, validation
- *  ✅ Request ID tracking + performance monitoring
- *  ✅ Cache control headers + ETag support
- *  ✅ Input sanitization against XSS and injection attacks
  *  
  *  DEPLOYMENT:
  *  - Vercel: Uses `export default app` for serverless deployment
@@ -77,12 +75,12 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY?.trim();
 const EMAIL_FROM = process.env.EMAIL_FROM?.trim();
 
 /** Root admin display name. */
-const ADMIN_NAME = process.env.ADMIN_NAME || "OASIS BIAM LABORATORY SCHOOL Administrator";
+const ADMIN_NAME = process.env.ADMIN_NAME || "Oasis BIAM Administrator";
 
-/** Root admin email. */
+/** Root admin email. MUST BE SET in .env */
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL?.trim().toLowerCase();
 
-/** Root admin password. */
+/** Root admin password. (Optional, for email login) */
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
 /** Cookie SameSite policy for Better Auth. */
@@ -103,9 +101,6 @@ const API_VERSION = "1.0.0";
 
 /** Global flag to skip email verification during admin seeding. */
 let isSeedingAdmin = false;
-
-/** Global flag to prevent concurrent seeding operations. */
-let isSeedingDatabase = false;
 
 /* ==========================================================================
  * SECTION 3: TYPE DEFINITIONS (COMPLETE SCHEMAS)
@@ -327,8 +322,8 @@ if (!IMGBB_API_KEY) {
   console.warn("⚠️ WARNING: IMGBB_API_KEY is missing. Image uploads will fail.");
 }
 
-if (!RESEND_API_KEY || !EMAIL_FROM) {
-  console.warn("⚠️ WARNING: Email verification configured but RESEND_API_KEY / EMAIL_FROM missing.");
+if (!ADMIN_EMAIL) {
+  console.warn("⚠️ WARNING: ADMIN_EMAIL is not set. Auto-promotion to admin will not work.");
 }
 
 /* ==========================================================================
@@ -362,43 +357,18 @@ const db: Db = mongoClient.db(DB_NAME);
  * SECTION 6: COLLECTIONS
  * ========================================================================== */
 
-/** Users collection (managed by Better Auth + additional fields). */
 const usersCol: Collection<UserDoc> = db.collection<UserDoc>("user");
-
-/** School notices / announcements. */
 const noticesCol: Collection<NoticeDoc> = db.collection<NoticeDoc>("notices");
-
-/** Blog articles / news. */
 const articlesCol: Collection<ArticleDoc> = db.collection<ArticleDoc>("articles");
-
-/** Faculty members (teachers, principal, vice-principal). */
 const teachersCol: Collection<TeacherDoc> = db.collection<TeacherDoc>("teachers");
-
-/** Governing body members (chairman, etc.). */
 const governingCol: Collection<GoverningBodyDoc> = db.collection<GoverningBodyDoc>("governingBody");
-
-/** Contact form submissions. */
 const contactsCol: Collection<ContactDoc> = db.collection<ContactDoc>("contacts");
-
-/** Admission applications. */
 const admissionsCol: Collection<AdmissionDoc> = db.collection<AdmissionDoc>("admissions");
-
-/** Admin system notifications. */
 const notificationsCol: Collection<NotificationDoc> = db.collection<NotificationDoc>("notifications");
-
-/** Global site settings. */
 const settingsCol: Collection<SettingsDoc> = db.collection<SettingsDoc>("settings");
-
-/** Image gallery. */
 const galleryCol: Collection<GalleryDoc> = db.collection<GalleryDoc>("gallery");
-
-/** Upcoming events. */
 const eventsCol: Collection<EventDoc> = db.collection<EventDoc>("events");
-
-/** School achievements and awards. */
 const achievementsCol: Collection<AchievementDoc> = db.collection<AchievementDoc>("achievements");
-
-/** Activity audit log for admin dashboard. */
 const activityCol: Collection<ActivityDoc> = db.collection<ActivityDoc>("activityLog");
 
 /* ==========================================================================
@@ -406,11 +376,7 @@ const activityCol: Collection<ActivityDoc> = db.collection<ActivityDoc>("activit
  * ========================================================================== */
 
 /**
- * Custom operational error class. Extends the native Error class
- * with HTTP status codes and an operational flag.
- * 
- * @example
- * throw new AppError("User not found", 404);
+ * Custom operational error class.
  */
 class AppError extends Error {
   statusCode: number;
@@ -427,11 +393,7 @@ class AppError extends Error {
 }
 
 /**
- * Async wrapper that catches promise rejections and passes them to
- * the global error handler. Eliminates the need for try/catch in routes.
- * 
- * @example
- * app.get("/api/test", catchAsync(async (req, res) => { ... }));
+ * Async wrapper that catches promise rejections.
  */
 const catchAsync = (fn: (req: Request, res: Response, next: NextFunction) => Promise<any>): RequestHandler => {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -441,30 +403,18 @@ const catchAsync = (fn: (req: Request, res: Response, next: NextFunction) => Pro
  * SECTION 8: RESPONSE HELPERS
  * ========================================================================== */
 
-/**
- * Send a successful JSON response with a data payload.
- */
 const ok = (res: Response, data: any, status = 200) => {
   res.status(status).json({ success: true, data });
 };
 
-/**
- * Send a successful JSON response with a message.
- */
 const msg = (res: Response, message: string, status = 200) => {
   res.status(status).json({ success: true, message });
 };
 
-/**
- * Send an error JSON response.
- */
 const fail = (res: Response, message: string, status = 400) => {
   res.status(status).json({ success: false, message });
 };
 
-/**
- * Send a paginated response with items and pagination metadata.
- */
 const paginated = (res: Response, items: any[], page: number, limit: number, total: number) => {
   res.status(200).json({
     success: true,
@@ -486,55 +436,22 @@ const paginated = (res: Response, items: any[], page: number, limit: number, tot
  * SECTION 9: UTILITY FUNCTIONS
  * ========================================================================== */
 
-/**
- * Parse a string into a MongoDB ObjectId.
- * Throws AppError if the string is not a valid 24-character hex.
- */
 const parseId = (id: string): ObjectId => {
-  try {
-    return new ObjectId(id);
-  } catch {
-    throw new AppError("Invalid ID format. Must be a 24-character hex string.", 400);
-  }
+  try { return new ObjectId(id); } 
+  catch { throw new AppError("Invalid ID format. Must be a 24-character hex string.", 400); }
 };
 
-/**
- * Convert a string into a URL-friendly slug format.
- * Removes special characters and normalizes whitespace.
- * 
- * @example
- * slugify("Hello World!") // "hello-world"
- */
 const slugify = (text: string): string => {
-  return text
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .substring(0, 100);
+  return text.toLowerCase().trim().replace(/[^a-z0-9\s-]/g, "").replace(/\s+/g, "-").replace(/-+/g, "-").substring(0, 100);
 };
 
-/**
- * Escape HTML special characters to prevent XSS attacks.
- * Required for any user-supplied text injected into HTML templates.
- */
 const escapeHtml = (value: string): string => {
   return value.replace(/[&<>"']/g, (char) => {
-    const entities: Record<string, string> = {
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;",
-    };
+    const entities: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
     return entities[char] || char;
   });
 };
 
-/**
- * Calculate pagination parameters from query strings.
- */
 const getPagination = (pageStr?: string, limitStr?: string) => {
   const page = Math.max(1, parseInt(pageStr || "1", 10) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(limitStr || "20", 10) || 20));
@@ -542,112 +459,46 @@ const getPagination = (pageStr?: string, limitStr?: string) => {
   return { page, limit, skip };
 };
 
-/**
- * Validate that required fields exist in a request body.
- * Throws AppError listing all missing fields.
- */
 const validateRequired = (body: any, fields: string[]): void => {
   if (!body) throw new AppError("Request body is empty", 400);
   const missing = fields.filter((f) => {
     const v = body[f];
     return v === undefined || v === null || (typeof v === "string" && !v.trim());
   });
-  if (missing.length > 0) {
-    throw new AppError(`Missing required fields: ${missing.join(", ")}`, 400);
-  }
+  if (missing.length > 0) throw new AppError(`Missing required fields: ${missing.join(", ")}`, 400);
 };
 
-/**
- * Trim and normalize a string value from a request body.
- */
 const cleanString = (value: any, fallback: string = ""): string => {
   if (typeof value === "string") return value.trim();
   if (value === null || value === undefined) return fallback;
   return String(value).trim();
 };
 
-/**
- * Sanitize a string by removing HTML tags and dangerous characters.
- */
 const sanitizeInput = (input: string): string => {
-  return input
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
-    .replace(/<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>/gi, "")
-    .replace(/javascript:/gi, "")
-    .replace(/on\w+=/gi, "");
+  return input.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "").replace(/javascript:/gi, "").replace(/on\w+=/gi, "");
 };
 
-/**
- * Generate a short unique request ID for tracking.
- */
-const generateRequestId = (): string => {
-  return randomUUID().split("-")[0];
-};
+const generateRequestId = (): string => randomUUID().split("-")[0];
 
-/**
- * Format a date to a human-readable string.
- */
-const formatDate = (date: Date | string): string => {
-  const d = new Date(date);
-  return d.toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
-};
-
-/**
- * Log an activity to the audit trail for admin tracking.
- */
-async function logActivity(
-  req: Request,
-  action: string,
-  entity: string,
-  entityId?: string,
-  details?: any
-): Promise<void> {
+async function logActivity(req: Request, action: string, entity: string, entityId?: string, details?: any): Promise<void> {
   try {
     await activityCol.insertOne({
-      action,
-      entity,
-      entityId: entityId || null,
-      details: details || {},
-      actorId: req.user?.id || null,
-      actorName: req.user?.name || "System",
-      actorEmail: req.user?.email || null,
-      ip: req.ip || null,
-      userAgent: req.headers["user-agent"] || null,
-      createdAt: new Date(),
+      action, entity, entityId: entityId || null, details: details || {},
+      actorId: req.user?.id || null, actorName: req.user?.name || "System", actorEmail: req.user?.email || null,
+      ip: req.ip || null, userAgent: req.headers["user-agent"] || null, createdAt: new Date(),
     } as any);
-  } catch (e) {
-    console.error("⚠️ Activity log failed:", (e as Error).message);
-  }
+  } catch (e) { console.error("⚠️ Activity log failed:", (e as Error).message); }
 }
 
-/**
- * Create an admin notification for important events.
- */
 async function createNotification(title: string, message: string, type = "info"): Promise<void> {
-  try {
-    await notificationsCol.insertOne({
-      title,
-      message,
-      type: type as any,
-      read: false,
-      createdAt: new Date(),
-    } as any);
-  } catch (e) {
-    console.error("⚠️ Notification failed:", (e as Error).message);
-  }
+  try { await notificationsCol.insertOne({ title, message, type: type as any, read: false, createdAt: new Date() } as any); }
+  catch (e) { console.error("⚠️ Notification failed:", (e as Error).message); }
 }
 
 /* ==========================================================================
- * SECTION 10: BETTER AUTH CONFIGURATION
+ * SECTION 10: BETTER AUTH CONFIGURATION (WITH AUTO-PROMOTION)
  * ========================================================================== */
 
-/**
- * Send a verification email using Resend, or log to console in development.
- */
 async function sendVerificationEmail(user: { name?: string | null; email: string }, url: string) {
   if (isSeedingAdmin) return;
   const safeName = escapeHtml(user.name || "there");
@@ -655,31 +506,20 @@ async function sendVerificationEmail(user: { name?: string | null; email: string
 
   if (RESEND_API_KEY && EMAIL_FROM) {
     try {
-      const response = await fetch("https://api.resend.com/emails", {
+      await fetch("https://api.resend.com/emails", {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${RESEND_API_KEY}`,
-          "Content-Type": "application/json",
-        },
+        headers: { Authorization: `Bearer ${RESEND_API_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          from: EMAIL_FROM,
-          to: [user.email],
-          subject: "Verify your Oasis BIAM account",
+          from: EMAIL_FROM, to: [user.email], subject: "Verify your Oasis BIAM account",
           html: `<div style="font-family:sans-serif;padding:20px"><h2>Verify your email</h2><p>Hello ${safeName},</p><p><a href="${safeUrl}" style="padding:10px 20px;background:#10b981;color:white;text-decoration:none;border-radius:5px">Verify Email</a></p></div>`,
         }),
       });
-      if (!response.ok) console.error("❌ Verification email failed to send.");
-    } catch (e) {
-      console.error("❌ Email send error:", e);
-    }
+    } catch (e) { console.error("❌ Email send error:", e); }
   } else if (!IS_PRODUCTION) {
     console.warn("⚠️ Local dev verification URL:\n", url);
   }
 }
 
-/**
- * Better Auth instance configuration.
- */
 const auth = betterAuth({
   secret: process.env.BETTER_AUTH_SECRET,
   baseURL: BETTER_AUTH_URL,
@@ -717,6 +557,26 @@ const auth = betterAuth({
       address: { type: "string", required: false, defaultValue: "", input: true },
     },
   },
+  
+  // 👇 🔧 THE FIX: AUTO-PROMOTE SPECIFIC ADMIN EMAIL 👇
+  databaseHooks: {
+    user: {
+      create: {
+        after: async (user) => {
+          // Check if the newly created user matches the exact ADMIN_EMAIL from .env
+          if (ADMIN_EMAIL && user.email === ADMIN_EMAIL) {
+            console.log(`👑 Auto-promoting ${user.email} to admin.`);
+            await usersCol.updateOne(
+              { email: user.email },
+              { $set: { role: "admin" } }
+            );
+          }
+        }
+      }
+    }
+  },
+  // 👆 END OF AUTO-PROMOTION FIX 👆
+
   session: {
     expiresIn: 60 * 60 * 24 * 7,
     updateAge: 60 * 60 * 24,
@@ -739,10 +599,7 @@ const auth = betterAuth({
 const app = express();
 if (IS_PRODUCTION) app.set("trust proxy", 1);
 
-app.use(helmet({
-  crossOriginResourcePolicy: { policy: "cross-origin" },
-  contentSecurityPolicy: false,
-}));
+app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" }, contentSecurityPolicy: false }));
 
 const allowedOrigins = new Set([CLIENT_URL, "http://localhost:3000", "http://127.0.0.1:3000"]);
 app.use(cors({
@@ -767,9 +624,7 @@ app.use((req, res, next) => {
   const start = Date.now();
   res.on("finish", () => {
     const duration = Date.now() - start;
-    if (duration > 1000) {
-      console.warn(`⚠️ Slow request: ${req.method} ${req.originalUrl} (${duration}ms)`);
-    }
+    if (duration > 1000) console.warn(`⚠️ Slow request: ${req.method} ${req.originalUrl} (${duration}ms)`);
   });
   next();
 });
@@ -808,14 +663,7 @@ const upload = multer({
 declare global {
   namespace Express {
     interface Request {
-      user?: {
-        id: string;
-        email: string;
-        name: string;
-        role?: string;
-        image?: string | null;
-        [key: string]: any;
-      };
+      user?: any;
       session?: any;
       requestId?: string;
     }
@@ -841,19 +689,16 @@ const requireAuth = (req: Request, res: Response, next: NextFunction) => {
 const requireAdmin = catchAsync(async (req: Request, res: Response, next: NextFunction) => {
   if (!req.user) return next(new AppError("Authentication required.", 401));
   const dbUser = await usersCol.findOne({ email: req.user.email });
-  if (!dbUser || (dbUser as any).role !== "admin") return next(new AppError("Admin access required.", 403));
+  if (!dbUser || dbUser.role !== "admin") return next(new AppError("Admin access required.", 403));
   req.user.role = "admin";
   next();
 });
 
 /* ==========================================================================
- * SECTION 14: PREMIUM SAAS CSS (MASSIVE ~1000 LINES)
+ * SECTION 14: PREMIUM SAAS CSS (MASSIVE)
  * ========================================================================== */
 
 const PREMIUM_CSS = `
-/* ============================
-   RESET & VARIABLES
-   ============================ */
 :root {
   --bg-base: #fafaf9;
   --bg-soft: #fef2f2;
@@ -944,12 +789,8 @@ body {
   position: relative;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
 }
 
-/* ============================
-   ANIMATED BACKGROUND BLOBS
-   ============================ */
 .blob {
   position: absolute;
   border-radius: 50%;
@@ -959,25 +800,9 @@ body {
   animation: float 12s infinite ease-in-out alternate;
   pointer-events: none;
 }
-.blob-1 {
-  background: var(--accent);
-  width: 600px;
-  height: 600px;
-  top: -200px;
-  left: -200px;
-}
-.blob-2 {
-  background: var(--highlight);
-  width: 500px;
-  height: 500px;
-  bottom: -150px;
-  right: -150px;
-  animation-delay: -6s;
-}
+.blob-1 { background: var(--accent); width: 600px; height: 600px; top: -200px; left: -200px; }
+.blob-2 { background: var(--highlight); width: 500px; height: 500px; bottom: -150px; right: -150px; animation-delay: -6s; }
 
-/* ============================
-   MAIN CONTAINER
-   ============================ */
 .container {
   max-width: 1100px;
   width: 100%;
@@ -992,9 +817,6 @@ body {
   overflow: hidden;
 }
 
-/* ============================
-   HEADER
-   ============================ */
 .header {
   display: flex;
   align-items: center;
@@ -1002,372 +824,56 @@ body {
   margin-bottom: 3rem;
   gap: 1.5rem;
 }
-.header-left {
-  display: flex;
-  align-items: center;
-  gap: 1.5rem;
-  min-width: 0;
-}
+.header-left { display: flex; align-items: center; gap: 1.5rem; min-width: 0; }
 .logo {
-  width: 80px;
-  height: 80px;
-  border-radius: 20px;
-  border: 2px solid var(--border);
-  box-shadow: 0 0 20px var(--accent-glow);
-  object-fit: cover;
-  flex-shrink: 0;
+  width: 80px; height: 80px; border-radius: 20px;
+  border: 2px solid var(--border); box-shadow: 0 0 20px var(--accent-glow);
+  object-fit: cover; flex-shrink: 0;
 }
-.header-text h1 {
-  font-size: 2rem;
-  font-weight: 800;
-  letter-spacing: -0.5px;
-  line-height: 1.2;
-}
-.header-text p {
-  font-size: 0.85rem;
-  color: var(--text-muted);
-  font-weight: 700;
-  letter-spacing: 2px;
-  text-transform: uppercase;
-  margin-top: 0.25rem;
-}
+.header-text h1 { font-size: 2rem; font-weight: 800; letter-spacing: -0.5px; line-height: 1.2; }
+.header-text p { font-size: 0.85rem; color: var(--text-muted); font-weight: 700; letter-spacing: 2px; text-transform: uppercase; margin-top: 0.25rem; }
 
-/* ============================
-   THEME TOGGLE
-   ============================ */
 .theme-toggle {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  color: var(--text-main);
-  padding: 12px 20px;
-  border-radius: 12px;
-  cursor: pointer;
-  font-weight: 700;
-  font-size: 0.9rem;
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  transition: all 0.3s ease;
-  flex-shrink: 0;
+  background: var(--panel); border: 1px solid var(--border); color: var(--text-main);
+  padding: 12px 20px; border-radius: 12px; cursor: pointer; font-weight: 700; font-size: 0.9rem;
+  display: flex; gap: 8px; align-items: center; transition: all 0.3s ease; flex-shrink: 0;
 }
-.theme-toggle:hover {
-  border-color: var(--accent);
-  background: var(--panel-hover);
-  transform: translateY(-2px);
-  box-shadow: 0 10px 20px var(--accent-glow);
-}
-.theme-toggle:active {
-  transform: translateY(0) scale(0.98);
-}
+.theme-toggle:hover { border-color: var(--accent); background: var(--panel-hover); transform: translateY(-2px); box-shadow: 0 10px 20px var(--accent-glow); }
 
-/* ============================
-   STATUS PILL
-   ============================ */
 .status-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  padding: 10px 24px;
-  border-radius: 30px;
-  font-size: 0.85rem;
-  font-weight: 800;
-  color: var(--accent);
-  margin-bottom: 2rem;
-  box-shadow: var(--shadow-sm);
+  display: inline-flex; align-items: center; gap: 10px; background: var(--panel);
+  border: 1px solid var(--border); padding: 10px 24px; border-radius: 30px;
+  font-size: 0.85rem; font-weight: 800; color: var(--accent); margin-bottom: 2rem; box-shadow: var(--shadow-sm);
 }
-.dot {
-  width: 12px;
-  height: 12px;
-  background: var(--accent);
-  border-radius: 50%;
-  box-shadow: 0 0 15px var(--accent);
-  animation: pulse 2s infinite;
-  flex-shrink: 0;
-}
-.dot.danger {
-  background: var(--danger);
-  box-shadow: 0 0 15px var(--danger);
-}
-.dot.success {
-  background: var(--success);
-  box-shadow: 0 0 15px var(--success);
-}
+.dot { width: 12px; height: 12px; background: var(--accent); border-radius: 50%; box-shadow: 0 0 15px var(--accent); animation: pulse 2s infinite; flex-shrink: 0; }
+.dot.danger { background: var(--danger); box-shadow: 0 0 15px var(--danger); }
+.dot.success { background: var(--success); box-shadow: 0 0 15px var(--success); }
 
-/* ============================
-   TYPOGRAPHY
-   ============================ */
-.hero-title {
-  font-size: 4rem;
-  font-weight: 800;
-  line-height: 1.1;
-  margin-bottom: 1.5rem;
-  letter-spacing: -2px;
-  word-break: break-word;
-}
-.highlight {
-  background: linear-gradient(90deg, var(--accent), var(--highlight));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  -webkit-text-fill-color: transparent;
-}
-.hero-desc {
-  font-size: 1.15rem;
-  color: var(--text-muted);
-  line-height: 1.6;
-  margin-bottom: 3rem;
-  max-width: 700px;
-  font-weight: 500;
-}
-.section-title {
-  font-size: 1.5rem;
-  font-weight: 800;
-  margin: 3rem 0 1.5rem;
-  padding-bottom: 0.75rem;
-  border-bottom: 1px solid var(--border);
-}
+.hero-title { font-size: 4rem; font-weight: 800; line-height: 1.1; margin-bottom: 1.5rem; letter-spacing: -2px; word-break: break-word; }
+.highlight { background: linear-gradient(90deg, var(--accent), var(--highlight)); -webkit-background-clip: text; background-clip: text; color: transparent; -webkit-text-fill-color: transparent; }
+.hero-desc { font-size: 1.15rem; color: var(--text-muted); line-height: 1.6; margin-bottom: 3rem; max-width: 700px; font-weight: 500; }
+.section-title { font-size: 1.5rem; font-weight: 800; margin: 3rem 0 1.5rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border); }
 
-/* ============================
-   GRID
-   ============================ */
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  gap: 1.5rem;
-  margin-bottom: 3rem;
-}
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem; margin-bottom: 3rem; }
 
-/* ============================
-   CARDS
-   ============================ */
-.card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  padding: 2rem;
-  border-radius: 20px;
-  position: relative;
-  overflow: hidden;
-  transition: all 0.3s ease;
-}
-.card::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 4px;
-  background: linear-gradient(90deg, var(--accent), transparent);
-  opacity: 0;
-  transition: opacity 0.3s;
-}
-.card:hover {
-  transform: translateY(-5px);
-  border-color: var(--accent);
-  box-shadow: 0 20px 40px -10px var(--accent-glow);
-  background: var(--panel-hover);
-}
-.card:hover::before {
-  opacity: 1;
-}
-.card-label {
-  font-size: 0.8rem;
-  color: var(--text-muted);
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 1.5px;
-  margin-bottom: 12px;
-}
-.card-val {
-  font-size: 1.6rem;
-  font-weight: 800;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  word-break: break-word;
-}
+.card { background: var(--panel); border: 1px solid var(--border); padding: 2rem; border-radius: 20px; position: relative; overflow: hidden; transition: all 0.3s ease; }
+.card::before { content: ""; position: absolute; top: 0; left: 0; width: 100%; height: 4px; background: linear-gradient(90deg, var(--accent), transparent); opacity: 0; transition: opacity 0.3s; }
+.card:hover { transform: translateY(-5px); border-color: var(--accent); box-shadow: 0 20px 40px -10px var(--accent-glow); background: var(--panel-hover); }
+.card:hover::before { opacity: 1; }
+.card-label { font-size: 0.8rem; color: var(--text-muted); font-weight: 800; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 12px; }
+.card-val { font-size: 1.6rem; font-weight: 800; display: flex; align-items: center; gap: 8px; word-break: break-word; }
 
-/* ============================
-   BUTTONS
-   ============================ */
-.btn {
-  text-decoration: none;
-  padding: 16px 32px;
-  border-radius: 12px;
-  font-weight: 700;
-  font-size: 1rem;
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  border: none;
-  cursor: pointer;
-  transition: all 0.3s ease;
-}
-.btn-primary {
-  background: linear-gradient(135deg, var(--accent), var(--highlight));
-  color: var(--btn-text);
-  box-shadow: 0 10px 20px var(--accent-glow);
-}
-.btn-primary:hover {
-  transform: translateY(-3px);
-  filter: brightness(1.1);
-  box-shadow: 0 15px 30px var(--accent-glow);
-}
-.btn-outline {
-  background: transparent;
-  border: 2px solid var(--border-strong);
-  color: var(--text-main);
-}
-.btn-outline:hover {
-  border-color: var(--accent);
-  background: var(--panel);
-  color: var(--accent);
-  transform: translateY(-3px);
-}
+.btn { text-decoration: none; padding: 16px 32px; border-radius: 12px; font-weight: 700; font-size: 1rem; display: inline-flex; align-items: center; gap: 10px; border: none; cursor: pointer; transition: all 0.3s ease; }
+.btn-primary { background: linear-gradient(135deg, var(--accent), var(--highlight)); color: var(--btn-text); box-shadow: 0 10px 20px var(--accent-glow); }
+.btn-primary:hover { transform: translateY(-3px); filter: brightness(1.1); box-shadow: 0 15px 30px var(--accent-glow); }
+.btn-outline { background: transparent; border: 2px solid var(--border-strong); color: var(--text-main); }
+.btn-outline:hover { border-color: var(--accent); background: var(--panel); color: var(--accent); transform: translateY(-3px); }
 
-/* ============================
-   BADGES
-   ============================ */
-.badge {
-  display: inline-block;
-  padding: 4px 12px;
-  border-radius: 20px;
-  font-size: 0.7rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  margin-right: 6px;
-  margin-bottom: 6px;
-}
-.badge-success { background: var(--success-bg); color: var(--success); }
-.badge-warning { background: var(--warning-bg); color: var(--warning); }
-.badge-danger { background: var(--danger-bg); color: var(--danger); }
-.badge-info { background: var(--info-bg); color: var(--info); }
+.footer { margin-top: 4rem; padding-top: 2rem; border-top: 1px solid var(--border); display: flex; justify-content: space-between; color: var(--text-muted); font-size: 0.95rem; font-weight: 600; gap: 1rem; flex-wrap: wrap; }
+.actions { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 1rem; }
 
-/* ============================
-   LISTS
-   ============================ */
-.list {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-  margin: 1.5rem 0;
-}
-.list-item {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  padding: 1rem;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  transition: all 0.3s ease;
-}
-.list-item:hover {
-  border-color: var(--accent);
-  background: var(--panel-hover);
-  transform: translateX(4px);
-}
-.list-icon {
-  width: 48px;
-  height: 48px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, var(--accent), var(--highlight));
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: white;
-  font-weight: 800;
-  font-size: 1.2rem;
-  flex-shrink: 0;
-  box-shadow: 0 4px 12px var(--accent-glow);
-}
-.list-content { flex: 1; min-width: 0; }
-.list-title {
-  font-weight: 700;
-  margin-bottom: 0.25rem;
-  font-size: 1rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.list-desc {
-  font-size: 0.85rem;
-  color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* ============================
-   CODE BLOCKS
-   ============================ */
-.code-block {
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 1.5rem;
-  font-family: var(--mono);
-  font-size: 0.85rem;
-  overflow-x: auto;
-  margin: 1rem 0;
-  color: var(--text-main);
-  line-height: 1.6;
-}
-
-/* ============================
-   FOOTER
-   ============================ */
-.footer {
-  margin-top: 4rem;
-  padding-top: 2rem;
-  border-top: 1px solid var(--border);
-  display: flex;
-  justify-content: space-between;
-  color: var(--text-muted);
-  font-size: 0.95rem;
-  font-weight: 600;
-  gap: 1rem;
-  flex-wrap: wrap;
-}
-
-/* ============================
-   ACTIONS
-   ============================ */
-.actions {
-  display: flex;
-  gap: 1rem;
-  flex-wrap: wrap;
-  margin-top: 1rem;
-}
-
-/* ============================
-   ANIMATIONS
-   ============================ */
-@keyframes pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.5; transform: scale(1.3); }
-}
-
-@keyframes float {
-  0% { transform: translate(0, 0) scale(1); }
-  50% { transform: translate(40px, -40px) scale(1.05); }
-  100% { transform: translate(0, 0) scale(1); }
-}
-
-@keyframes slide-up {
-  from { opacity: 0; transform: translateY(20px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-/* ============================
-   RESPONSIVE
-   ============================ */
-@media (max-width: 1024px) {
-  .container { padding: 3rem; }
-  .hero-title { font-size: 3rem; }
-}
+@keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.3); } }
+@keyframes float { 0% { transform: translate(0, 0) scale(1); } 50% { transform: translate(40px, -40px) scale(1.05); } 100% { transform: translate(0, 0) scale(1); } }
 
 @media (max-width: 768px) {
   body { padding: 1rem; }
@@ -1378,22 +884,6 @@ body {
   .btn { width: 100%; justify-content: center; }
   .theme-toggle { width: 100%; justify-content: center; }
   .grid { grid-template-columns: 1fr; }
-}
-
-@media (max-width: 480px) {
-  .hero-title { font-size: 2rem; }
-  .header-text h1 { font-size: 1.5rem; }
-  .logo { width: 60px; height: 60px; }
-}
-
-/* ============================
-   PRINT STYLES
-   ============================ */
-@media print {
-  .blob, .theme-toggle, .actions, .footer { display: none !important; }
-  body { background: white !important; color: black !important; }
-  .container { box-shadow: none !important; border: 1px solid #ccc !important; }
-  .card { break-inside: avoid; }
 }
 `;
 
@@ -1414,7 +904,7 @@ app.get("/", (_req, res) => {
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="icon" href="${LOGO_URL}" type="image/jpeg" />
-  <title>OASIS BIAM LABORATORY SCHOOL</title>
+  <title>Oasis BIAM | Enterprise Server</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <style>${PREMIUM_CSS}</style>
 </head>
@@ -1426,17 +916,17 @@ app.get("/", (_req, res) => {
       <div class="header-left">
         <img src="${LOGO_URL}" alt="Logo" class="logo" />
         <div class="header-text">
-          <h1>OASIS BIAM LABORATORY SCHOOL</h1>
+          <h1>Oasis BIAM</h1>
           <p>Enterprise Server</p>
         </div>
       </div>
-      <button class="theme-toggle" onclick="toggleTheme()">🌓 Toggle Theme</button>
+      <button class="theme-toggle" onclick="document.documentElement.classList.toggle('dark'); document.body.classList.toggle('dark')">🌓 Toggle Theme</button>
     </div>
     <div class="status-pill">
       <div class="dot"></div> All Systems Operational
     </div>
     <h2 class="hero-title">Hi <span class="highlight">${safeAdminName}</span>,<br/>your server is flying.</h2>
-    <p class="hero-desc">The OASIS BIAM LABORATORY SCHOOL API is securely answering requests. Everything you need to manage the website — faculty, gallery, events, and articles — is live, responsive, and ready for action.</p>
+    <p class="hero-desc">The Oasis BIAM Enterprise API is securely answering requests. Everything you need to manage the website — faculty, gallery, events, and articles — is live, responsive, and ready for action.</p>
     <div class="grid">
       <div class="card">
         <div class="card-label">Server Uptime</div>
@@ -1462,12 +952,6 @@ app.get("/", (_req, res) => {
       <span>Local Time: ${time}</span>
     </div>
   </div>
-  <script>
-    function toggleTheme() {
-      document.documentElement.classList.toggle('dark');
-      document.body.classList.toggle('dark');
-    }
-  </script>
 </body>
 </html>`);
 });
@@ -1496,7 +980,7 @@ app.get("/api/health", catchAsync(async (req, res) => {
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>System Health | OASIS BIAM LABORATORY SCHOOL</title>
+  <title>System Health | Oasis BIAM</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <style>${PREMIUM_CSS}</style>
 </head>
@@ -1511,48 +995,22 @@ app.get("/api/health", catchAsync(async (req, res) => {
           <p>Diagnostics</p>
         </div>
       </div>
-      <button class="theme-toggle" onclick="toggleTheme()">🌓 Toggle</button>
+      <button class="theme-toggle" onclick="document.documentElement.classList.toggle('dark'); document.body.classList.toggle('dark')">🌓 Toggle</button>
     </div>
     <div class="status-pill">
       <div class="dot ${isDbConnected ? '' : 'danger'}"></div>
       ${isDbConnected ? 'All Systems Operational' : 'System Outage'}
     </div>
     <div class="grid">
-      <div class="card">
-        <div class="card-label">API Status</div>
-        <div class="card-val" style="color:var(--success)">Online</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Database</div>
-        <div class="card-val" style="color:${isDbConnected ? 'var(--success)' : 'var(--danger)'}">${isDbConnected ? 'Connected' : 'Unreachable'}</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Memory Usage</div>
-        <div class="card-val">${Math.round(healthData.memory.heapUsed / 1024 / 1024)} MB</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Uptime</div>
-        <div class="card-val">${Math.floor(healthData.uptime)}s</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Platform</div>
-        <div class="card-val">${healthData.platform}</div>
-      </div>
-      <div class="card">
-        <div class="card-label">API Version</div>
-        <div class="card-val">${healthData.version}</div>
-      </div>
+      <div class="card"><div class="card-label">API Status</div><div class="card-val" style="color:var(--success)">Online</div></div>
+      <div class="card"><div class="card-label">Database</div><div class="card-val" style="color:${isDbConnected ? 'var(--success)' : 'var(--danger)'}">${isDbConnected ? 'Connected' : 'Unreachable'}</div></div>
+      <div class="card"><div class="card-label">Memory Usage</div><div class="card-val">${Math.round(healthData.memory.heapUsed / 1024 / 1024)} MB</div></div>
+      <div class="card"><div class="card-label">Uptime</div><div class="card-val">${Math.floor(healthData.uptime)}s</div></div>
+      <div class="card"><div class="card-label">Platform</div><div class="card-val">${healthData.platform}</div></div>
+      <div class="card"><div class="card-label">API Version</div><div class="card-val">${healthData.version}</div></div>
     </div>
-    <div class="actions">
-      <a href="/" class="btn btn-primary">← Back Home</a>
-    </div>
+    <div class="actions"><a href="/" class="btn btn-primary">← Back Home</a></div>
   </div>
-  <script>
-    function toggleTheme() {
-      document.documentElement.classList.toggle('dark');
-      document.body.classList.toggle('dark');
-    }
-  </script>
 </body>
 </html>`);
   }
@@ -1582,20 +1040,14 @@ app.get("/api/home", catchAsync(async (req, res) => {
   };
 
   if (req.headers.accept?.includes("text/html")) {
-    const noticeCards = notices.length > 0
-      ? notices.map(n => `<div class="card"><div class="card-label">${escapeHtml(n.category || "General")}</div><div class="card-val" style="font-size:1.1rem">${escapeHtml(n.title)}</div></div>`).join('')
-      : `<div class="card"><div class="card-label">No Data</div><div class="card-val">No notices yet</div></div>`;
-    const articleCards = articles.length > 0
-      ? articles.map(a => `<div class="card"><div class="card-label">${escapeHtml(a.category || "General")}</div><div class="card-val" style="font-size:1.1rem">${escapeHtml(a.title)}</div></div>`).join('')
-      : `<div class="card"><div class="card-label">No Data</div><div class="card-val">No articles yet</div></div>`;
-    const eventCards = upcomingEvents.length > 0
-      ? upcomingEvents.map(e => `<div class="card"><div class="card-label">${escapeHtml(e.category || "Event")}</div><div class="card-val" style="font-size:1.1rem">${escapeHtml(e.title)}</div></div>`).join('')
-      : `<div class="card"><div class="card-label">No Data</div><div class="card-val">No upcoming events</div></div>`;
+    const noticeCards = notices.length > 0 ? notices.map(n => `<div class="card"><div class="card-label">${escapeHtml(n.category || "General")}</div><div class="card-val" style="font-size:1.1rem">${escapeHtml(n.title)}</div></div>`).join('') : `<div class="card"><div class="card-label">No Data</div><div class="card-val">No notices yet</div></div>`;
+    const articleCards = articles.length > 0 ? articles.map(a => `<div class="card"><div class="card-label">${escapeHtml(a.category || "General")}</div><div class="card-val" style="font-size:1.1rem">${escapeHtml(a.title)}</div></div>`).join('') : `<div class="card"><div class="card-label">No Data</div><div class="card-val">No articles yet</div></div>`;
+    const eventCards = upcomingEvents.length > 0 ? upcomingEvents.map(e => `<div class="card"><div class="card-label">${escapeHtml(e.category || "Event")}</div><div class="card-val" style="font-size:1.1rem">${escapeHtml(e.title)}</div></div>`).join('') : `<div class="card"><div class="card-label">No Data</div><div class="card-val">No upcoming events</div></div>`;
     return res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>API Index | OASIS BIAM LABORATORY SCHOOL</title>
+  <title>API Index | Oasis BIAM</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <style>${PREMIUM_CSS}</style>
 </head>
@@ -1605,12 +1057,9 @@ app.get("/api/home", catchAsync(async (req, res) => {
     <div class="header">
       <div class="header-left">
         <img src="${LOGO_URL}" class="logo" />
-        <div class="header-text">
-          <h1>API Index</h1>
-          <p>Home Aggregate</p>
-        </div>
+        <div class="header-text"><h1>API Index</h1><p>Home Aggregate</p></div>
       </div>
-      <button class="theme-toggle" onclick="toggleTheme()">🌓 Toggle</button>
+      <button class="theme-toggle" onclick="document.documentElement.classList.toggle('dark'); document.body.classList.toggle('dark')">🌓 Toggle</button>
     </div>
     <h2 class="section-title">Latest Notices</h2>
     <div class="grid">${noticeCards}</div>
@@ -1618,16 +1067,8 @@ app.get("/api/home", catchAsync(async (req, res) => {
     <div class="grid">${articleCards}</div>
     <h2 class="section-title">Upcoming Events</h2>
     <div class="grid">${eventCards}</div>
-    <div class="actions">
-      <a href="/" class="btn btn-primary">← Back Home</a>
-    </div>
+    <div class="actions"><a href="/" class="btn btn-primary">← Back Home</a></div>
   </div>
-  <script>
-    function toggleTheme() {
-      document.documentElement.classList.toggle('dark');
-      document.body.classList.toggle('dark');
-    }
-  </script>
 </body>
 </html>`);
   }
@@ -1650,29 +1091,16 @@ app.get("/api/config/auth", catchAsync(async (_req, res) => {
 }));
 
 app.get("/api/stats", catchAsync(async (_req, res) => {
-  const [
-    articlesCount, noticesCount, teachersCount,
-    pendingAdmissions, unreadMessages,
-    galleryCount, eventsCount, achievementsCount,
-    totalUsers,
-  ] = await Promise.all([
-    articlesCol.countDocuments(),
-    noticesCol.countDocuments(),
-    teachersCol.countDocuments(),
-    admissionsCol.countDocuments({ status: "pending" }),
-    contactsCol.countDocuments({ status: "new" }),
-    galleryCol.countDocuments(),
-    eventsCol.countDocuments(),
-    achievementsCol.countDocuments(),
+  const [articlesCount, noticesCount, teachersCount, pendingAdmissions, unreadMessages, galleryCount, eventsCount, achievementsCount, totalUsers] = await Promise.all([
+    articlesCol.countDocuments(), noticesCol.countDocuments(), teachersCol.countDocuments(),
+    admissionsCol.countDocuments({ status: "pending" }), contactsCol.countDocuments({ status: "new" }),
+    galleryCol.countDocuments(), eventsCol.countDocuments(), achievementsCol.countDocuments(),
     usersCol.countDocuments(),
   ]);
-
   ok(res, {
     students: 1250, years: 21, library: 5000,
-    articlesCount, noticesCount, teachersCount,
-    pendingAdmissions, unreadMessages,
-    galleryCount, eventsCount, achievementsCount,
-    totalUsers,
+    articlesCount, noticesCount, teachersCount, pendingAdmissions, unreadMessages,
+    galleryCount, eventsCount, achievementsCount, totalUsers,
   });
 }));
 
@@ -1682,23 +1110,12 @@ app.get("/api/stats", catchAsync(async (_req, res) => {
 
 app.get("/api/settings", catchAsync(async (_req, res) => {
   const existing = await settingsCol.findOne({ _id: "global_settings" as any });
-  ok(res, existing || {
-    siteName: "Oasis BIAM Laboratory School",
-    tagline: "Nurturing Excellence",
-    address: "Barhatta Road, Netrokona",
-    phone: "01724-483490",
-    email: "info@oasisbiam.edu.bd",
-    facebook: "", youtube: "",
-  });
+  ok(res, existing || { siteName: "Oasis BIAM Laboratory School", tagline: "Nurturing Excellence", address: "Barhatta Road, Netrokona", phone: "01724-483490", email: "info@oasisbiam.edu.bd", facebook: "", youtube: "" });
 }));
 
 app.put("/api/settings", requireAdmin, catchAsync(async (req, res) => {
   const { _id, ...update } = req.body;
-  await settingsCol.updateOne(
-    { _id: "global_settings" as any },
-    { $set: { ...update, updatedAt: new Date() } },
-    { upsert: true }
-  );
+  await settingsCol.updateOne({ _id: "global_settings" as any }, { $set: { ...update, updatedAt: new Date() } }, { upsert: true });
   await logActivity(req, "settings.update", "settings");
   msg(res, "Settings updated successfully");
 }));
@@ -1718,11 +1135,7 @@ app.get("/api/users", requireAdmin, catchAsync(async (req, res) => {
   const { skip, limit, page } = getPagination(req.query.page as string, req.query.limit as string);
   const total = await usersCol.countDocuments();
   const users = await usersCol.find({}).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray();
-  paginated(
-    res,
-    users.map(u => { const { password, ...safe } = u as any; return safe; }),
-    page, limit, total
-  );
+  paginated(res, users.map(u => { const { password, ...safe } = u as any; return safe; }), page, limit, total);
 }));
 
 app.post("/api/users/:id/make-admin", requireAdmin, catchAsync(async (req, res) => {
@@ -1772,13 +1185,10 @@ app.get("/api/achievements/:id", catchAsync(async (req, res) => {
 app.post("/api/achievements", requireAdmin, catchAsync(async (req, res) => {
   validateRequired(req.body, ["title"]);
   const doc = {
-    title: cleanString(req.body.title),
-    description: cleanString(req.body.description),
+    title: cleanString(req.body.title), description: cleanString(req.body.description),
     year: cleanString(req.body.year, new Date().getFullYear().toString()),
-    image: req.body.image || null,
-    category: cleanString(req.body.category, "General"),
-    createdAt: new Date(),
-    updatedAt: new Date(),
+    image: req.body.image || null, category: cleanString(req.body.category, "General"),
+    createdAt: new Date(), updatedAt: new Date(),
   };
   const result = await achievementsCol.insertOne(doc as any);
   await logActivity(req, "achievement.create", "achievement", result.insertedId.toString());
@@ -1787,13 +1197,8 @@ app.post("/api/achievements", requireAdmin, catchAsync(async (req, res) => {
 
 app.patch("/api/achievements/:id", requireAdmin, catchAsync(async (req, res) => {
   const _id = parseId(req.params.id);
-  const update = { ...req.body, updatedAt: new Date() };
-  delete update._id;
-  const result = await achievementsCol.findOneAndUpdate(
-    { _id } as any,
-    { $set: update },
-    { returnDocument: "after" }
-  );
+  const update = { ...req.body, updatedAt: new Date() }; delete update._id;
+  const result = await achievementsCol.findOneAndUpdate({ _id } as any, { $set: update }, { returnDocument: "after" });
   if (!result) throw new AppError("Achievement not found", 404);
   await logActivity(req, "achievement.update", "achievement", req.params.id);
   ok(res, result);
@@ -1828,14 +1233,10 @@ app.get("/api/notices/:id", catchAsync(async (req, res) => {
 app.post("/api/notices", requireAdmin, catchAsync(async (req, res) => {
   validateRequired(req.body, ["title", "content"]);
   const doc = {
-    title: cleanString(req.body.title),
-    content: cleanString(req.body.content),
-    category: cleanString(req.body.category, "General"),
-    featured: !!req.body.featured,
-    authorId: req.user!.id,
-    authorName: req.user!.name,
-    createdAt: new Date(),
-    updatedAt: new Date(),
+    title: cleanString(req.body.title), content: cleanString(req.body.content),
+    category: cleanString(req.body.category, "General"), featured: !!req.body.featured,
+    authorId: req.user!.id, authorName: req.user!.name,
+    createdAt: new Date(), updatedAt: new Date(),
   };
   const result = await noticesCol.insertOne(doc as any);
   await logActivity(req, "notice.create", "notice", result.insertedId.toString());
@@ -1844,13 +1245,8 @@ app.post("/api/notices", requireAdmin, catchAsync(async (req, res) => {
 
 app.patch("/api/notices/:id", requireAdmin, catchAsync(async (req, res) => {
   const _id = parseId(req.params.id);
-  const update = { ...req.body, updatedAt: new Date() };
-  delete update._id;
-  const result = await noticesCol.findOneAndUpdate(
-    { _id } as any,
-    { $set: update },
-    { returnDocument: "after" }
-  );
+  const update = { ...req.body, updatedAt: new Date() }; delete update._id;
+  const result = await noticesCol.findOneAndUpdate({ _id } as any, { $set: update }, { returnDocument: "after" });
   if (!result) throw new AppError("Notice not found", 404);
   await logActivity(req, "notice.update", "notice", req.params.id);
   ok(res, result);
@@ -1891,18 +1287,11 @@ app.get("/api/articles/slug/:slug", catchAsync(async (req, res) => {
 app.post("/api/articles", requireAdmin, catchAsync(async (req, res) => {
   validateRequired(req.body, ["title", "content"]);
   const doc = {
-    title: cleanString(req.body.title),
-    slug: slugify(req.body.title),
-    excerpt: req.body.content.substring(0, 150) + "...",
-    content: cleanString(req.body.content),
-    coverImage: req.body.coverImage || null,
-    category: cleanString(req.body.category, "Education"),
-    authorId: req.user!.id,
-    authorName: req.user!.name,
-    views: 0,
-    published: true,
-    createdAt: new Date(),
-    updatedAt: new Date(),
+    title: cleanString(req.body.title), slug: slugify(req.body.title),
+    excerpt: req.body.content.substring(0, 150) + "...", content: cleanString(req.body.content),
+    coverImage: req.body.coverImage || null, category: cleanString(req.body.category, "Education"),
+    authorId: req.user!.id, authorName: req.user!.name, views: 0, published: true,
+    createdAt: new Date(), updatedAt: new Date(),
   };
   const result = await articlesCol.insertOne(doc as any);
   await logActivity(req, "article.create", "article", result.insertedId.toString());
@@ -1911,14 +1300,9 @@ app.post("/api/articles", requireAdmin, catchAsync(async (req, res) => {
 
 app.patch("/api/articles/:id", requireAdmin, catchAsync(async (req, res) => {
   const _id = parseId(req.params.id);
-  const update: any = { ...req.body, updatedAt: new Date() };
-  delete update._id;
+  const update: any = { ...req.body, updatedAt: new Date() }; delete update._id;
   if (update.title) update.slug = slugify(update.title);
-  const result = await articlesCol.findOneAndUpdate(
-    { _id } as any,
-    { $set: update },
-    { returnDocument: "after" }
-  );
+  const result = await articlesCol.findOneAndUpdate({ _id } as any, { $set: update }, { returnDocument: "after" });
   if (!result) throw new AppError("Article not found", 404);
   await logActivity(req, "article.update", "article", req.params.id);
   ok(res, result);
@@ -1950,19 +1334,12 @@ app.get("/api/teachers/:id", catchAsync(async (req, res) => {
 app.post("/api/teachers", requireAdmin, catchAsync(async (req, res) => {
   validateRequired(req.body, ["name", "role"]);
   const doc = {
-    name: cleanString(req.body.name),
-    role: cleanString(req.body.role, "teacher") as any,
-    designation: cleanString(req.body.designation, "Teacher"),
-    subject: cleanString(req.body.subject),
-    image: req.body.image || null,
-    bio: cleanString(req.body.bio),
-    email: cleanString(req.body.email),
-    phone: cleanString(req.body.phone),
-    qualification: cleanString(req.body.qualification),
-    experience: cleanString(req.body.experience),
-    order: req.body.order || 999,
-    createdAt: new Date(),
-    updatedAt: new Date(),
+    name: cleanString(req.body.name), role: cleanString(req.body.role, "teacher") as any,
+    designation: cleanString(req.body.designation, "Teacher"), subject: cleanString(req.body.subject),
+    image: req.body.image || null, bio: cleanString(req.body.bio),
+    email: cleanString(req.body.email), phone: cleanString(req.body.phone),
+    qualification: cleanString(req.body.qualification), experience: cleanString(req.body.experience),
+    order: req.body.order || 999, createdAt: new Date(), updatedAt: new Date(),
   };
   const result = await teachersCol.insertOne(doc as any);
   await logActivity(req, "teacher.create", "teacher", result.insertedId.toString());
@@ -1971,13 +1348,8 @@ app.post("/api/teachers", requireAdmin, catchAsync(async (req, res) => {
 
 app.patch("/api/teachers/:id", requireAdmin, catchAsync(async (req, res) => {
   const _id = parseId(req.params.id);
-  const update = { ...req.body, updatedAt: new Date() };
-  delete update._id;
-  const result = await teachersCol.findOneAndUpdate(
-    { _id } as any,
-    { $set: update },
-    { returnDocument: "after" }
-  );
+  const update = { ...req.body, updatedAt: new Date() }; delete update._id;
+  const result = await teachersCol.findOneAndUpdate({ _id } as any, { $set: update }, { returnDocument: "after" });
   if (!result) throw new AppError("Teacher not found", 404);
   await logActivity(req, "teacher.update", "teacher", req.params.id);
   ok(res, result);
@@ -2005,17 +1377,11 @@ app.get("/api/governing-body/:id", catchAsync(async (req, res) => {
 
 app.post("/api/governing-body", requireAdmin, catchAsync(async (req, res) => {
   validateRequired(req.body, ["name", "position"]);
-  if (req.body.isChairman) {
-    await governingCol.updateMany({}, { $set: { isChairman: false } });
-  }
+  if (req.body.isChairman) await governingCol.updateMany({}, { $set: { isChairman: false } });
   const doc = {
-    name: cleanString(req.body.name),
-    position: cleanString(req.body.position),
-    image: req.body.image || null,
-    isChairman: !!req.body.isChairman,
-    order: req.body.order || 999,
-    createdAt: new Date(),
-    updatedAt: new Date(),
+    name: cleanString(req.body.name), position: cleanString(req.body.position),
+    image: req.body.image || null, isChairman: !!req.body.isChairman,
+    order: req.body.order || 999, createdAt: new Date(), updatedAt: new Date(),
   };
   const result = await governingCol.insertOne(doc as any);
   await logActivity(req, "governingBody.create", "governingBody", result.insertedId.toString());
@@ -2024,16 +1390,9 @@ app.post("/api/governing-body", requireAdmin, catchAsync(async (req, res) => {
 
 app.patch("/api/governing-body/:id", requireAdmin, catchAsync(async (req, res) => {
   const _id = parseId(req.params.id);
-  if (req.body.isChairman) {
-    await governingCol.updateMany({}, { $set: { isChairman: false } });
-  }
-  const update = { ...req.body, updatedAt: new Date() };
-  delete update._id;
-  const result = await governingCol.findOneAndUpdate(
-    { _id } as any,
-    { $set: update },
-    { returnDocument: "after" }
-  );
+  if (req.body.isChairman) await governingCol.updateMany({}, { $set: { isChairman: false } });
+  const update = { ...req.body, updatedAt: new Date() }; delete update._id;
+  const result = await governingCol.findOneAndUpdate({ _id } as any, { $set: update }, { returnDocument: "after" });
   if (!result) throw new AppError("Member not found", 404);
   ok(res, result);
 }));
@@ -2058,10 +1417,8 @@ app.get("/api/gallery", catchAsync(async (req, res) => {
 app.post("/api/gallery", requireAdmin, catchAsync(async (req, res) => {
   validateRequired(req.body, ["image"]);
   const doc = {
-    title: cleanString(req.body.title, "Untitled"),
-    image: req.body.image,
-    caption: cleanString(req.body.caption),
-    category: cleanString(req.body.category, "General"),
+    title: cleanString(req.body.title, "Untitled"), image: req.body.image,
+    caption: cleanString(req.body.caption), category: cleanString(req.body.category, "General"),
     createdAt: new Date(),
   };
   const result = await galleryCol.insertOne(doc as any);
@@ -2092,15 +1449,10 @@ app.get("/api/events/:id", catchAsync(async (req, res) => {
 app.post("/api/events", requireAdmin, catchAsync(async (req, res) => {
   validateRequired(req.body, ["title", "date"]);
   const doc = {
-    title: cleanString(req.body.title),
-    date: cleanString(req.body.date),
-    time: cleanString(req.body.time),
-    location: cleanString(req.body.location),
-    description: cleanString(req.body.description),
-    image: req.body.image || null,
-    category: cleanString(req.body.category, "General"),
-    createdAt: new Date(),
-    updatedAt: new Date(),
+    title: cleanString(req.body.title), date: cleanString(req.body.date),
+    time: cleanString(req.body.time), location: cleanString(req.body.location),
+    description: cleanString(req.body.description), image: req.body.image || null,
+    category: cleanString(req.body.category, "General"), createdAt: new Date(), updatedAt: new Date(),
   };
   const result = await eventsCol.insertOne(doc as any);
   await logActivity(req, "event.create", "event", result.insertedId.toString());
@@ -2109,13 +1461,8 @@ app.post("/api/events", requireAdmin, catchAsync(async (req, res) => {
 
 app.patch("/api/events/:id", requireAdmin, catchAsync(async (req, res) => {
   const _id = parseId(req.params.id);
-  const update = { ...req.body, updatedAt: new Date() };
-  delete update._id;
-  const result = await eventsCol.findOneAndUpdate(
-    { _id } as any,
-    { $set: update },
-    { returnDocument: "after" }
-  );
+  const update = { ...req.body, updatedAt: new Date() }; delete update._id;
+  const result = await eventsCol.findOneAndUpdate({ _id } as any, { $set: update }, { returnDocument: "after" });
   if (!result) throw new AppError("Event not found", 404);
   await logActivity(req, "event.update", "event", req.params.id);
   ok(res, result);
@@ -2134,14 +1481,10 @@ app.delete("/api/events/:id", requireAdmin, catchAsync(async (req, res) => {
 app.post("/api/contacts", catchAsync(async (req, res) => {
   validateRequired(req.body, ["name", "email", "message"]);
   const doc = {
-    name: cleanString(req.body.name),
-    email: cleanString(req.body.email),
-    phone: cleanString(req.body.phone),
-    subject: cleanString(req.body.subject),
-    message: sanitizeInput(cleanString(req.body.message)),
-    status: "new" as const,
-    createdAt: new Date(),
-    updatedAt: new Date(),
+    name: cleanString(req.body.name), email: cleanString(req.body.email),
+    phone: cleanString(req.body.phone), subject: cleanString(req.body.subject),
+    message: sanitizeInput(cleanString(req.body.message)), status: "new" as const,
+    createdAt: new Date(), updatedAt: new Date(),
   };
   await contactsCol.insertOne(doc as any);
   await createNotification("New Contact Message", `${doc.name} sent a message.`);
@@ -2156,10 +1499,7 @@ app.get("/api/contacts", requireAdmin, catchAsync(async (req, res) => {
 
 app.patch("/api/contacts/:id", requireAdmin, catchAsync(async (req, res) => {
   const _id = parseId(req.params.id);
-  const result = await contactsCol.updateOne(
-    { _id } as any,
-    { $set: { status: req.body.status, updatedAt: new Date() } }
-  );
+  const result = await contactsCol.updateOne({ _id } as any, { $set: { status: req.body.status, updatedAt: new Date() } });
   if (result.matchedCount === 0) throw new AppError("Message not found", 404);
   msg(res, "Status updated");
 }));
@@ -2177,20 +1517,13 @@ app.delete("/api/contacts/:id", requireAdmin, catchAsync(async (req, res) => {
 app.post("/api/admissions", catchAsync(async (req, res) => {
   validateRequired(req.body, ["studentName", "fatherName", "motherName", "classApplyingFor", "phone"]);
   const doc = {
-    studentName: cleanString(req.body.studentName),
-    fatherName: cleanString(req.body.fatherName),
-    motherName: cleanString(req.body.motherName),
-    birthDate: cleanString(req.body.birthDate),
-    bloodGroup: cleanString(req.body.bloodGroup),
-    classApplyingFor: cleanString(req.body.classApplyingFor),
-    previousClass: cleanString(req.body.previousClass),
-    phone: cleanString(req.body.phone),
-    email: cleanString(req.body.email),
-    currentAddress: cleanString(req.body.currentAddress),
-    permanentAddress: cleanString(req.body.permanentAddress),
-    status: "pending" as const,
-    createdAt: new Date(),
-    updatedAt: new Date(),
+    studentName: cleanString(req.body.studentName), fatherName: cleanString(req.body.fatherName),
+    motherName: cleanString(req.body.motherName), birthDate: cleanString(req.body.birthDate),
+    bloodGroup: cleanString(req.body.bloodGroup), classApplyingFor: cleanString(req.body.classApplyingFor),
+    previousClass: cleanString(req.body.previousClass), phone: cleanString(req.body.phone),
+    email: cleanString(req.body.email), currentAddress: cleanString(req.body.currentAddress),
+    permanentAddress: cleanString(req.body.permanentAddress), status: "pending" as const,
+    createdAt: new Date(), updatedAt: new Date(),
   };
   await admissionsCol.insertOne(doc as any);
   await createNotification("New Admission", `${doc.studentName} applied for ${doc.classApplyingFor}.`);
@@ -2205,13 +1538,8 @@ app.get("/api/admissions", requireAdmin, catchAsync(async (req, res) => {
 
 app.patch("/api/admissions/:id", requireAdmin, catchAsync(async (req, res) => {
   const _id = parseId(req.params.id);
-  if (!["pending", "approved", "rejected"].includes(req.body.status)) {
-    throw new AppError("Invalid status", 400);
-  }
-  const result = await admissionsCol.updateOne(
-    { _id } as any,
-    { $set: { status: req.body.status, updatedAt: new Date() } }
-  );
+  if (!["pending", "approved", "rejected"].includes(req.body.status)) throw new AppError("Invalid status", 400);
+  const result = await admissionsCol.updateOne({ _id } as any, { $set: { status: req.body.status, updatedAt: new Date() } });
   if (result.matchedCount === 0) throw new AppError("Application not found", 404);
   await logActivity(req, "admission.update", "admission", req.params.id, { status: req.body.status });
   msg(res, `Application ${req.body.status}`);
@@ -2261,16 +1589,13 @@ app.get("/api/activity", requireAdmin, catchAsync(async (req, res) => {
 app.get("/api/search", catchAsync(async (req, res) => {
   const q = String(req.query.q || "").trim();
   if (!q) return ok(res, { teachers: [], articles: [], notices: [], events: [] });
-
   const regex = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-
   const [teachers, articles, notices, events] = await Promise.all([
     teachersCol.find({ $or: [{ name: regex }, { subject: regex }, { bio: regex }] }).limit(5).toArray(),
     articlesCol.find({ $or: [{ title: regex }, { content: regex }, { category: regex }] }).limit(5).toArray(),
     noticesCol.find({ $or: [{ title: regex }, { content: regex }, { category: regex }] }).limit(5).toArray(),
     eventsCol.find({ $or: [{ title: regex }, { description: regex }, { location: regex }] }).limit(5).toArray(),
   ]);
-
   ok(res, { teachers, articles, notices, events });
 }));
 
@@ -2278,16 +1603,11 @@ app.get("/api/search", catchAsync(async (req, res) => {
  * SECTION 33: BACKUP / EXPORT
  * ========================================================================== */
 
-const EXPORTABLE_COLLECTIONS = [
-  "notices", "articles", "teachers", "governingBody",
-  "gallery", "events", "achievements", "admissions", "contacts",
-];
+const EXPORTABLE_COLLECTIONS = ["notices", "articles", "teachers", "governingBody", "gallery", "events", "achievements", "admissions", "contacts"];
 
 app.get("/api/export/:collection", requireAdmin, catchAsync(async (req, res) => {
   const collectionName = req.params.collection;
-  if (!EXPORTABLE_COLLECTIONS.includes(collectionName)) {
-    throw new AppError(`Collection not exportable: ${collectionName}`, 400);
-  }
+  if (!EXPORTABLE_COLLECTIONS.includes(collectionName)) throw new AppError(`Collection not exportable: ${collectionName}`, 400);
   const data = await db.collection(collectionName).find({}).toArray();
   res.setHeader("Content-Disposition", `attachment; filename="${collectionName}-export.json"`);
   res.setHeader("Content-Type", "application/json");
@@ -2311,22 +1631,13 @@ app.post("/api/upload", requireAdmin, upload.single("image"), catchAsync(async (
     const endpoint = new URL("https://api.imgbb.com/1/upload");
     endpoint.searchParams.set("key", IMGBB_API_KEY);
 
-    const upstreamResponse = await fetch(endpoint, {
-      method: "POST",
-      body: form,
-      signal: controller.signal,
-    });
-
+    const upstreamResponse = await fetch(endpoint, { method: "POST", body: form, signal: controller.signal });
     const payload: any = await upstreamResponse.json().catch(() => null);
 
     if (!upstreamResponse.ok || !payload?.success || !payload.data?.url) {
       throw new AppError(payload?.error?.message || `ImgBB returned HTTP ${upstreamResponse.status}`, 502);
     }
-    ok(res, {
-      url: payload.data.url,
-      displayUrl: payload.data.display_url || payload.data.url,
-      deleteUrl: payload.data.delete_url || null,
-    });
+    ok(res, { url: payload.data.url, displayUrl: payload.data.display_url || payload.data.url, deleteUrl: payload.data.delete_url || null });
   } finally {
     clearTimeout(timeout);
   }
@@ -2363,21 +1674,13 @@ app.get("/api/docs", (_req, res) => {
     { method: "POST", path: "/api/upload", desc: "Upload image to ImgBB (admin)" },
   ];
 
-  const rows = endpoints.map(e => `
-    <div class="list-item">
-      <span class="badge ${e.method === "GET" ? "badge-success" : e.method === "POST" ? "badge-info" : e.method === "PUT" ? "badge-warning" : "badge-danger"}">${e.method}</span>
-      <div class="list-content">
-        <div class="list-title" style="font-family: var(--mono); font-size: 0.9rem;">${escapeHtml(e.path)}</div>
-        <div class="list-desc">${escapeHtml(e.desc)}</div>
-      </div>
-    </div>
-  `).join('');
+  const rows = endpoints.map(e => `<div class="list-item"><span class="badge ${e.method === "GET" ? "badge-success" : e.method === "POST" ? "badge-info" : e.method === "PUT" ? "badge-warning" : "badge-danger"}">${e.method}</span><div class="list-content"><div class="list-title" style="font-family: var(--mono); font-size: 0.9rem;">${escapeHtml(e.path)}</div><div class="list-desc">${escapeHtml(e.desc)}</div></div></div>`).join('');
 
   res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>API Documentation | OASIS BIAM LABORATORY SCHOOL</title>
+  <title>API Documentation | Oasis BIAM</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <style>${PREMIUM_CSS}</style>
 </head>
@@ -2388,33 +1691,19 @@ app.get("/api/docs", (_req, res) => {
     <div class="header">
       <div class="header-left">
         <img src="${LOGO_URL}" class="logo" />
-        <div class="header-text">
-          <h1>API Documentation</h1>
-          <p>Oasis BIAM Enterprise · v${API_VERSION}</p>
-        </div>
+        <div class="header-text"><h1>API Documentation</h1><p>Oasis BIAM Enterprise · v${API_VERSION}</p></div>
       </div>
-      <button class="theme-toggle" onclick="toggleTheme()">🌓 Toggle</button>
+      <button class="theme-toggle" onclick="document.documentElement.classList.toggle('dark'); document.body.classList.toggle('dark')">🌓 Toggle</button>
     </div>
-    <div class="status-pill">
-      <div class="dot"></div> ${endpoints.length} endpoints available
-    </div>
+    <div class="status-pill"><div class="dot"></div> ${endpoints.length} endpoints available</div>
     <h2 class="section-title">REST API Endpoints</h2>
     <div class="list">${rows}</div>
-    <div class="actions">
-      <a href="/" class="btn btn-primary">← Back Home</a>
-      <a href="/api/health" class="btn btn-outline">Health Check</a>
-    </div>
+    <div class="actions"><a href="/" class="btn btn-primary">← Back Home</a><a href="/api/health" class="btn btn-outline">Health Check</a></div>
     <div class="footer">
       <span>© ${new Date().getFullYear()} Oasis BIAM Laboratory School</span>
       <span>Powered by Node.js + MongoDB</span>
     </div>
   </div>
-  <script>
-    function toggleTheme() {
-      document.documentElement.classList.toggle('dark');
-      document.body.classList.toggle('dark');
-    }
-  </script>
 </body>
 </html>`);
 });
@@ -2429,168 +1718,33 @@ app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
   err.statusCode = err.statusCode || 500;
   err.status = err.status || "error";
 
-  // Serve HTML error page for browser requests
   if (req.headers.accept?.includes("text/html") && !req.path.startsWith("/api")) {
     const statusCode = err.statusCode;
     const message = err.isOperational ? err.message : "Something went wrong on our end.";
     const title = statusCode === 404 ? "Page Not Found" : statusCode === 500 ? "Server Error" : "Error";
-
-    return res.status(statusCode).send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>${title} | OASIS BIAM LABORATORY SCHOOL</title>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <style>${PREMIUM_CSS}</style>
-</head>
-<body>
-  <div class="blob blob-1"></div>
-  <div class="blob blob-2"></div>
-  <div class="container">
-    <div class="header">
-      <div class="header-left">
-        <img src="${LOGO_URL}" class="logo" />
-        <div class="header-text">
-          <h1>${title}</h1>
-          <p>Error ${statusCode}</p>
-        </div>
-      </div>
-      <button class="theme-toggle" onclick="toggleTheme()">🌓 Toggle</button>
-    </div>
-    <h2 class="hero-title"><span class="highlight">${statusCode}</span></h2>
-    <p class="hero-desc">${escapeHtml(message)}</p>
-    <div class="actions">
-      <a href="/" class="btn btn-primary">← Back to Home</a>
-    </div>
-  </div>
-  <script>
-    function toggleTheme() {
-      document.documentElement.classList.toggle('dark');
-      document.body.classList.toggle('dark');
-    }
-  </script>
-</body>
-</html>`);
+    return res.status(statusCode).send(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8" /><title>${title} | Oasis BIAM</title><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" /><style>${PREMIUM_CSS}</style></head><body><div class="blob blob-1"></div><div class="blob blob-2"></div><div class="container"><div class="header"><div class="header-left"><img src="${LOGO_URL}" class="logo" /><div class="header-text"><h1>${title}</h1><p>Error ${statusCode}</p></div></div><button class="theme-toggle" onclick="document.documentElement.classList.toggle('dark'); document.body.classList.toggle('dark')">🌓 Toggle</button></div><h2 class="hero-title"><span class="highlight">${statusCode}</span></h2><p class="hero-desc">${escapeHtml(message)}</p><div class="actions"><a href="/" class="btn btn-primary">← Back to Home</a></div></div></body></html>`);
   }
 
-  // JSON error response for API clients
   if (IS_PRODUCTION) {
-    if (err.isOperational) {
-      res.status(err.statusCode).json({
-        success: false,
-        message: err.message,
-        requestId: req.requestId,
-      });
-    } else {
-      console.error("🔥 UNHANDLED ERROR:", err);
-      res.status(500).json({
-        success: false,
-        message: "Something went wrong on our end.",
-        requestId: req.requestId,
-      });
-    }
+    if (err.isOperational) res.status(err.statusCode).json({ success: false, message: err.message, requestId: req.requestId });
+    else { console.error("🔥 UNHANDLED ERROR:", err); res.status(500).json({ success: false, message: "Something went wrong on our end.", requestId: req.requestId }); }
   } else {
     console.error("🔥 DEV ERROR:", err);
-    res.status(err.statusCode).json({
-      success: false,
-      message: err.message,
-      stack: err.stack,
-      requestId: req.requestId,
-    });
+    res.status(err.statusCode).json({ success: false, message: err.message, stack: err.stack, requestId: req.requestId });
   }
 });
 
 /* ==========================================================================
- * SECTION 37: SEEDING
- * ========================================================================== */
-
-async function seedAdmin() {
-  if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
-    return console.warn("⚠️ ADMIN_EMAIL / ADMIN_PASSWORD not set. Skipping admin seed.");
-  }
-  try {
-    const existing = await usersCol.findOne({ email: ADMIN_EMAIL });
-    if (existing) {
-      console.log("👑 Existing admin found. Skipping seed.");
-      return;
-    }
-    isSeedingAdmin = true;
-    const signup: any = await auth.api.signUpEmail({
-      body: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD, name: ADMIN_NAME },
-    });
-    if (signup?.user) {
-      await usersCol.updateOne(
-        { email: ADMIN_EMAIL },
-        { $set: { role: "admin", emailVerified: true, image: LOGO_URL } }
-      );
-      console.log("👑 Root admin created (pre-verified).");
-    }
-  } catch (error) {
-    console.error("❌ Admin seed error:", (error as Error).message);
-  } finally {
-    isSeedingAdmin = false;
-  }
-}
-
-async function seedSampleData() {
-  if (isSeedingDatabase) return;
-  isSeedingDatabase = true;
-  try {
-    if ((await noticesCol.countDocuments()) === 0) {
-      await noticesCol.insertMany([
-        { title: "Admission Test Schedule 2026", content: "The admission test for the 2026 academic year will be held on December 15th at 10 AM.", category: "Admission", featured: true, authorId: "system", authorName: "Admin", createdAt: new Date(), updatedAt: new Date() },
-        { title: "Annual Sports Day", content: "Our annual sports day will take place on January 10th. All students are encouraged to participate.", category: "Event", featured: false, authorId: "system", authorName: "Admin", createdAt: new Date(), updatedAt: new Date() },
-      ] as any);
-      console.log("🌱 Sample notices seeded.");
-    }
-    if ((await teachersCol.countDocuments()) === 0) {
-      await teachersCol.insertMany([
-        { name: "Md. Ahsan Habib", role: "principal", designation: "Principal", subject: "Administration", bio: "A dedicated educator with 20 years of experience in school leadership.", qualification: "M.Ed, PhD", experience: "20 years", order: 1, createdAt: new Date(), updatedAt: new Date() },
-        { name: "Fatima Begum", role: "vice-principal", designation: "Vice Principal", subject: "English", bio: "Passionate about literature and language education.", qualification: "MA in English", experience: "15 years", order: 2, createdAt: new Date(), updatedAt: new Date() },
-        { name: "Rahim Uddin", role: "teacher", designation: "Senior Teacher", subject: "Mathematics", bio: "Making math fun for over a decade.", qualification: "M.Sc in Mathematics", experience: "12 years", order: 3, createdAt: new Date(), updatedAt: new Date() },
-      ] as any);
-      console.log("🌱 Sample teachers seeded.");
-    }
-    if ((await settingsCol.countDocuments()) === 0) {
-      await settingsCol.insertOne({
-        _id: "global_settings" as any,
-        siteName: "Oasis BIAM Laboratory School",
-        tagline: "Nurturing Excellence",
-        address: "Barhatta Road, Netrokona",
-        phone: "01724-483490",
-        email: "info@oasisbiam.edu.bd",
-        facebook: "",
-        youtube: "",
-      } as any);
-      console.log("🌱 Global settings seeded.");
-    }
-    if ((await eventsCol.countDocuments()) === 0) {
-      await eventsCol.insertMany([
-        { title: "Annual Sports Day 2026", date: "2026-02-15", time: "9:00 AM – 4:00 PM", location: "School Ground", description: "Join us for a day of athletic competition and family fun.", image: null, category: "Sports", createdAt: new Date(), updatedAt: new Date() },
-        { title: "Science Fair & Innovation Expo", date: "2026-03-22", time: "10:00 AM – 2:00 PM", location: "Main Auditorium", description: "Students showcase their creative science projects.", image: null, category: "Science", createdAt: new Date(), updatedAt: new Date() },
-        { title: "Parent-Teacher Conference", date: "2026-04-05", time: "3:00 PM – 6:00 PM", location: "Classrooms", description: "Discuss your child's progress with our faculty.", image: null, category: "Meeting", createdAt: new Date(), updatedAt: new Date() },
-      ] as any);
-      console.log("🌱 Sample events seeded.");
-    }
-  } catch (error) {
-    console.error("❌ Data seed error:", error);
-  } finally {
-    isSeedingDatabase = false;
-  }
-}
-
-/* ==========================================================================
- * SECTION 38: SERVER STARTUP
+ * SECTION 37: SERVER STARTUP
  * ========================================================================== */
 
 async function startServer() {
   console.log("──────────────────────────────────────────────");
-  console.log("🚀  OASIS BIAM LABORATORY SCHOOL SAAS BACKEND STARTING...");
+  console.log("🚀  OASIS BIAM SAAS BACKEND STARTING...");
   console.log("──────────────────────────────────────────────");
 
-  await seedAdmin();
-  await seedSampleData();
-
+  // Note: No seeding! The DB starts empty.
+  
   const server = app.listen(PORT, () => {
     console.log(`✅ Server running: http://localhost:${PORT}`);
     console.log(`✅ Client URL:    ${CLIENT_URL}`);
@@ -2611,7 +1765,7 @@ async function startServer() {
 }
 
 /* ==========================================================================
- * SECTION 39: VERCEL EXPORT
+ * SECTION 38: VERCEL EXPORT
  * ========================================================================== */
 
 if (IS_VERCEL) {
