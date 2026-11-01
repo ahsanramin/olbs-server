@@ -5,17 +5,6 @@
  *  Author: Ahsan Labib Ramin
  *  Architecture: Express + Better Auth + MongoDB + Vercel Serverless
  *  ==========================================================================
- *  এই ফাইলটি অত্যন্ত ডিটেইলড এবং প্রোডাকশন-রেডি। এখানে যা যা আছে:
- *  - লেজি ডেটাবেস কানেকশন (Vercel cold start fix)
- *  - Better Auth এর জন্য লেজি ইনিশিয়ালাইজেশন
- *  - ১৩টি কালেকশনের সম্পূর্ণ CRUD
- *  - Premium HTML ড্যাশবোর্ড
- *  - Vercel Cross-Domain Cookie Fix (SameSite=None)
- *  - Admission detail endpoint (admin dashboard detail page)
- *  - Admission document uploads (Birth Cert, School Cert, Photos, Parent NID)
- *  - Robust Public upload endpoint with detailed error logging & dual URL response
- *  - Image proxy endpoint (CORS-safe) for PDF generation
- *  ==========================================================================
  */
 
 /* ==========================================================================
@@ -67,7 +56,7 @@ const HERO_SLIDES = [
   "https://i.ibb.co.com/j9p9vNfJ/images-1.jpg",
   "https://i.ibb.co.com/67z0dmbS/images.jpg",
 ];
-const API_VERSION = "5.1.3";
+const API_VERSION = "5.1.4";
 
 /* ==========================================================================
  * SECTION 3: FATAL ENVIRONMENT VALIDATION
@@ -458,6 +447,8 @@ function getAuth(): Promise<AuthInstance> {
           
           trustedOrigins: [
             CLIENT_URL,
+            "https://oasis-biam-laboratory-school.vercel.app", // Added production frontend
+            "https://olbs-server.vercel.app",                  // Added production backend
             "http://localhost:3000",
             "http://127.0.0.1:3000"
           ],
@@ -481,7 +472,10 @@ function getAuth(): Promise<AuthInstance> {
               },
             },
           } : {}),
-          account: { accountLinking: { enabled: true, trustedProviders: ["google"] } },
+          account: { 
+            storeStateStrategy: "database", // 🔥 CRITICAL FIX: Forces OAuth state into MongoDB instead of relying on cookies
+            accountLinking: { enabled: true, trustedProviders: ["google"] } 
+          },
           logger: { disabled: true },
           user: {
             additionalFields: {
@@ -542,6 +536,8 @@ app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" }, contentS
 
 const allowedOrigins = new Set([
   CLIENT_URL, 
+  "https://oasis-biam-laboratory-school.vercel.app", // Added production frontend
+  "https://olbs-server.vercel.app",                  // Added production backend
   "http://localhost:3000", 
   "http://127.0.0.1:3000"
 ]);
@@ -1350,133 +1346,59 @@ app.post(
   upload.single("image"),
   catchAsync(async (req, res) => {
 
-    // 1. Validate uploaded file
     if (!req.file) {
-      throw new AppError(
-        "No image file provided. Use field 'image'.",
-        400
-      );
+      throw new AppError("No image file provided. Use field 'image'.", 400);
     }
 
-    // 2. Validate ImgBB configuration
     if (!IMGBB_API_KEY) {
-      throw new AppError(
-        "IMGBB_API_KEY is missing from backend environment.",
-        503
-      );
+      throw new AppError("IMGBB_API_KEY is missing from backend environment.", 503);
     }
 
     const controller = new AbortController();
-
-    const timeout = setTimeout(() => {
-      controller.abort();
-    }, 45000);
+    const timeout = setTimeout(() => controller.abort(), 45000);
 
     try {
-
-      // 3. Prepare ImgBB upload
       const form = new FormData();
+      form.append("image", req.file.buffer.toString("base64"));
+      const endpoint = new URL("https://api.imgbb.com/1/upload");
+      endpoint.searchParams.set("key", IMGBB_API_KEY);
 
-      form.append(
-        "image",
-        req.file.buffer.toString("base64")
-      );
-
-      const endpoint = new URL(
-        "https://api.imgbb.com/1/upload"
-      );
-
-      endpoint.searchParams.set(
-        "key",
-        IMGBB_API_KEY
-      );
-
-      // 4. Send image to ImgBB
       const imgResponse = await fetch(endpoint, {
         method: "POST",
         body: form,
         signal: controller.signal,
       });
 
-      // 5. Read ImgBB response
-      const imgData: any = await imgResponse
-        .json()
-        .catch(() => null);
-
+      const imgData: any = await imgResponse.json().catch(() => null);
       const imageUrl = imgData?.data?.url;
 
-      // 6. Validate ImgBB response
-      if (
-        !imgResponse.ok ||
-        imgData?.success !== true ||
-        !imageUrl
-      ) {
-
-        console.error(
-          "IMG BB UPLOAD FAILED:",
-          {
-            status: imgResponse.status,
-            response: imgData,
-          }
-        );
-
-        throw new AppError(
-          imgData?.error?.message ||
-          `ImgBB upload failed. HTTP ${imgResponse.status}`,
-          502
-        );
+      if (!imgResponse.ok || imgData?.success !== true || !imageUrl) {
+        console.error("IMG BB UPLOAD FAILED:", { status: imgResponse.status, response: imgData });
+        throw new AppError(imgData?.error?.message || `ImgBB upload failed. HTTP ${imgResponse.status}`, 502);
       }
 
-      // 7. Send consistent response to frontend
-      const displayUrl =
-        imgData?.data?.display_url || imageUrl;
-
+      const displayUrl = imgData?.data?.display_url || imageUrl;
       console.log("✅ PUBLIC IMAGE UPLOAD SUCCESS");
 
       return res.status(200).json({
-
         success: true,
-
-        // Root-level URL for compatibility
         url: imageUrl,
-
-        // Standard API response
         data: {
           url: imageUrl,
           displayUrl: displayUrl,
         },
-
       });
 
     } catch (error: any) {
-
-      if (error instanceof AppError) {
-        throw error;
-      }
-
-      console.error(
-        "PUBLIC UPLOAD ERROR:",
-        error
-      );
-
+      if (error instanceof AppError) throw error;
+      console.error("PUBLIC UPLOAD ERROR:", error);
       if (controller.signal.aborted) {
-        throw new AppError(
-          "ImgBB upload timed out. Please try again.",
-          504
-        );
+        throw new AppError("ImgBB upload timed out. Please try again.", 504);
       }
-
-      throw new AppError(
-        "Unable to connect to ImgBB. Check your backend internet connection.",
-        502
-      );
-
+      throw new AppError("Unable to connect to ImgBB. Check your backend internet connection.", 502);
     } finally {
-
       clearTimeout(timeout);
-
     }
-
   })
 );
 
