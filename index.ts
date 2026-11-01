@@ -56,7 +56,7 @@ const HERO_SLIDES = [
   "https://i.ibb.co.com/j9p9vNfJ/images-1.jpg",
   "https://i.ibb.co.com/67z0dmbS/images.jpg",
 ];
-const API_VERSION = "5.1.4";
+const API_VERSION = "5.1.5";
 
 /* ==========================================================================
  * SECTION 3: FATAL ENVIRONMENT VALIDATION
@@ -447,8 +447,8 @@ function getAuth(): Promise<AuthInstance> {
           
           trustedOrigins: [
             CLIENT_URL,
-            "https://oasis-biam-laboratory-school.vercel.app", // Added production frontend
-            "https://olbs-server.vercel.app",                  // Added production backend
+            "https://oasis-biam-laboratory-school.vercel.app",
+            "https://olbs-server.vercel.app",
             "http://localhost:3000",
             "http://127.0.0.1:3000"
           ],
@@ -473,9 +473,20 @@ function getAuth(): Promise<AuthInstance> {
             },
           } : {}),
           account: { 
-            storeStateStrategy: "database", // 🔥 CRITICAL FIX: Forces OAuth state into MongoDB instead of relying on cookies
+            storeStateStrategy: "database",
             accountLinking: { enabled: true, trustedProviders: ["google"] } 
           },
+          
+          // 🔥 CRITICAL FIX: Explicitly force the OAuth state cookie to be cross-site compatible
+          cookies: {
+            state: {
+              attributes: {
+                sameSite: "none",
+                secure: true,
+              },
+            },
+          },
+
           logger: { disabled: true },
           user: {
             additionalFields: {
@@ -536,8 +547,8 @@ app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" }, contentS
 
 const allowedOrigins = new Set([
   CLIENT_URL, 
-  "https://oasis-biam-laboratory-school.vercel.app", // Added production frontend
-  "https://olbs-server.vercel.app",                  // Added production backend
+  "https://oasis-biam-laboratory-school.vercel.app",
+  "https://olbs-server.vercel.app",
   "http://localhost:3000", 
   "http://127.0.0.1:3000"
 ]);
