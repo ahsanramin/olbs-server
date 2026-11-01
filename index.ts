@@ -2,7 +2,6 @@
  *  OASIS BIAM LABORATORY SCHOOL — ULTIMATE ENTERPRISE SERVER
  *  ==========================================================================
  *  File: index.ts
- *  Author: Ahsan Labib Ramin
  *  Architecture: Express + Better Auth + MongoDB + Vercel Serverless
  *  ==========================================================================
  */
@@ -22,7 +21,6 @@ import { MongoClient, ObjectId, Db, Collection, Document, Filter } from "mongodb
 import { betterAuth } from "better-auth";
 import { mongodbAdapter } from "better-auth/adapters/mongodb";
 import { toNodeHandler, fromNodeHeaders } from "better-auth/node";
-import { oAuthProxy } from "better-auth/plugins"; // ✅ ADDED FOR VERCEL OAUTH
 
 /* ==========================================================================
  * SECTION 2: ENVIRONMENT CONFIGURATION
@@ -49,7 +47,7 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const BETTER_AUTH_SECRET = process.env.BETTER_AUTH_SECRET?.trim();
 
 const AUTH_COOKIE_SAME_SITE = (
-  process.env.AUTH_COOKIE_SAME_SITE || (IS_PRODUCTION ? "none" : "lax")
+  process.env.AUTH_COOKIE_SAME_SITE || (IS_PRODUCTION ? "lax" : "lax")
 ) as "lax" | "strict" | "none";
 
 const LOGO_URL = "https://i.ibb.co.com/7NzsPGvc/logo.jpg";
@@ -428,7 +426,7 @@ async function sendVerificationEmail(user: { name?: string | null; email: string
 }
 
 /* ==========================================================================
- * SECTION 11: LAZY BETTER AUTH FACTORY (🔧 Vercel Fix)
+ * SECTION 11: LAZY BETTER AUTH FACTORY (🔧 Vercel Rewrite Setup)
  * ========================================================================== */
 
 type AuthInstance = ReturnType<typeof betterAuth>;
@@ -443,13 +441,11 @@ function getAuth(): Promise<AuthInstance> {
       .then((db) => {
         const instance = betterAuth({
           secret: BETTER_AUTH_SECRET!,
-          baseURL: BETTER_AUTH_URL,
+          baseURL: BETTER_AUTH_URL, // In production, this is now the FRONTEND URL due to rewrites
           database: mongodbAdapter(db),
           
           trustedOrigins: [
             CLIENT_URL,
-            "https://oasis-biam-laboratory-school.vercel.app",
-            "https://olbs-server.vercel.app",
             "http://localhost:3000",
             "http://127.0.0.1:3000"
           ],
@@ -477,26 +473,8 @@ function getAuth(): Promise<AuthInstance> {
             storeStateStrategy: "database",
             accountLinking: { enabled: true, trustedProviders: ["google"] } 
           },
-          
-          // ✅ ADDED: oAuthProxy plugin for cross-domain Vercel deployments
-          plugins: [
-            oAuthProxy({
-              productionURL: "https://olbs-server.vercel.app", 
-            }),
-          ],
 
-          // 🔥 CRITICAL FIX: Explicitly force the OAuth state cookie to be cross-site compatible
-          cookies: {
-            state: {
-              attributes: {
-                sameSite: "none",
-                secure: true,
-                partitioned: true, // ✅ ADDED: Recommended for cross-site cookies
-              },
-            },
-          },
-
-          logger: { disabled: true },
+          logger: { disabled: false },
           user: {
             additionalFields: {
               role: { type: "string", defaultValue: "member", input: false },
@@ -507,11 +485,10 @@ function getAuth(): Promise<AuthInstance> {
           session: { expiresIn: 60 * 60 * 24 * 7, updateAge: 60 * 60 * 24 },
           advanced: {
             defaultCookieAttributes: {
-              sameSite: IS_PRODUCTION ? "none" : AUTH_COOKIE_SAME_SITE, // ✅ Force 'none' in production
-              secure: IS_PRODUCTION || AUTH_COOKIE_SAME_SITE === "none",
+              sameSite: "lax", // Safe for same-origin rewrite setup
+              secure: IS_PRODUCTION,
               httpOnly: true,
               path: "/",
-              partitioned: true, // ✅ ADDED: Recommended for cross-site cookies
             },
           },
           databaseHooks: {
@@ -558,7 +535,6 @@ app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" }, contentS
 const allowedOrigins = new Set([
   CLIENT_URL, 
   "https://oasis-biam-laboratory-school.vercel.app",
-  "https://olbs-server.vercel.app",
   "http://localhost:3000", 
   "http://127.0.0.1:3000"
 ]);
