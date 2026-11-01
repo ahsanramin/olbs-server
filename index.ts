@@ -10,6 +10,11 @@
  *  - Better Auth এর জন্য লেজি ইনিশিয়ালাইজেশন
  *  - ১৩টি কালেকশনের সম্পূর্ণ CRUD
  *  - Premium HTML ড্যাশবোর্ড
+ *  - Vercel Cross-Domain Cookie Fix (SameSite=None)
+ *  - Admission detail endpoint (admin dashboard detail page)
+ *  - Admission document uploads (Birth Cert, School Cert, Photos, Parent NID)
+ *  - Robust Public upload endpoint with detailed error logging & dual URL response
+ *  - Image proxy endpoint (CORS-safe) for PDF generation
  *  ==========================================================================
  */
 
@@ -36,8 +41,10 @@ import { toNodeHandler, fromNodeHeaders } from "better-auth/node";
 const PORT = Number(process.env.PORT || 5000);
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const IS_VERCEL = !!process.env.VERCEL;
+
 const CLIENT_URL = (process.env.CLIENT_URL || "http://localhost:3000").replace(/\/$/, "");
 const BETTER_AUTH_URL = (process.env.BETTER_AUTH_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
+
 const MONGODB_URI = process.env.MONGODB_URI;
 const DB_NAME = process.env.DB_NAME;
 
@@ -50,8 +57,9 @@ const ADMIN_EMAIL = process.env.ADMIN_EMAIL?.trim().toLowerCase();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
 const BETTER_AUTH_SECRET = process.env.BETTER_AUTH_SECRET?.trim();
+
 const AUTH_COOKIE_SAME_SITE = (
-  process.env.AUTH_COOKIE_SAME_SITE || (IS_PRODUCTION ? "lax" : "lax")
+  process.env.AUTH_COOKIE_SAME_SITE || (IS_PRODUCTION ? "none" : "lax")
 ) as "lax" | "strict" | "none";
 
 const LOGO_URL = "https://i.ibb.co.com/7NzsPGvc/logo.jpg";
@@ -59,7 +67,7 @@ const HERO_SLIDES = [
   "https://i.ibb.co.com/j9p9vNfJ/images-1.jpg",
   "https://i.ibb.co.com/67z0dmbS/images.jpg",
 ];
-const API_VERSION = "5.0.0";
+const API_VERSION = "5.1.3";
 
 /* ==========================================================================
  * SECTION 3: FATAL ENVIRONMENT VALIDATION
@@ -72,7 +80,7 @@ if (!BETTER_AUTH_SECRET || BETTER_AUTH_SECRET.length < 32) {
 }
 
 /* ==========================================================================
- * SECTION 4: TYPE DEFINITIONS (সম্পূর্ণ স্কিমা)
+ * SECTION 4: TYPE DEFINITIONS
  * ========================================================================== */
 
 interface BaseDoc extends Document {
@@ -157,6 +165,10 @@ interface AdmissionDoc extends BaseDoc {
   email: string;
   currentAddress: string;
   permanentAddress: string;
+  birthCertificateImage?: string;
+  previousSchoolCertificateImage?: string;
+  passportPhotosImage?: string;
+  parentNidImage?: string;
   status: "pending" | "approved" | "rejected";
 }
 
@@ -443,12 +455,13 @@ function getAuth(): Promise<AuthInstance> {
           secret: BETTER_AUTH_SECRET!,
           baseURL: BETTER_AUTH_URL,
           database: mongodbAdapter(db),
+          
           trustedOrigins: [
-            CLIENT_URL, 
-            "http://localhost:3000", 
-            "http://127.0.0.1:3000", 
-            "https://oasis-biam-laboratory-school.vercel.app"
+            CLIENT_URL,
+            "http://localhost:3000",
+            "http://127.0.0.1:3000"
           ],
+
           emailAndPassword: {
             enabled: true,
             requireEmailVerification: false,
@@ -530,13 +543,13 @@ app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" }, contentS
 const allowedOrigins = new Set([
   CLIENT_URL, 
   "http://localhost:3000", 
-  "http://127.0.0.1:3000", 
-  "https://oasis-biam-laboratory-school.vercel.app"
+  "http://127.0.0.1:3000"
 ]);
 
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin || allowedOrigins.has(origin)) return cb(null, true);
+    console.warn(`[CORS Blocked] Origin: ${origin}`);
     return cb(new AppError(`Blocked by CORS: ${origin}`, 403));
   },
   credentials: true,
@@ -769,7 +782,8 @@ app.get("/api/docs", (_req, res) => {
     { method: "PATCH", path: "/api/contacts/:id", desc: "Update status (admin)" },
     { method: "DELETE", path: "/api/contacts/:id", desc: "Delete (admin)" },
     { method: "GET", path: "/api/admissions", desc: "List applications (admin)" },
-    { method: "POST", path: "/api/admissions", desc: "Submit application" },
+    { method: "GET", path: "/api/admissions/:id", desc: "Get single application (admin)" },
+    { method: "POST", path: "/api/admissions", desc: "Submit application (with 4 documents)" },
     { method: "PATCH", path: "/api/admissions/:id", desc: "Update status (admin)" },
     { method: "DELETE", path: "/api/admissions/:id", desc: "Delete (admin)" },
     { method: "GET", path: "/api/notifications", desc: "Admin notifications" },
@@ -777,6 +791,8 @@ app.get("/api/docs", (_req, res) => {
     { method: "GET", path: "/api/search?q=query", desc: "Cross-collection search" },
     { method: "GET", path: "/api/export/:collection", desc: "Export data (admin)" },
     { method: "POST", path: "/api/upload", desc: "Upload image (admin)" },
+    { method: "POST", path: "/api/upload/public", desc: "Upload admission document (public, rate-limited)" },
+    { method: "GET", path: "/api/proxy/image?url=...", desc: "CORS-safe image proxy (whitelisted hosts)" },
   ];
 
   const rows = endpoints.map(e => {
@@ -1198,15 +1214,34 @@ app.delete("/api/contacts/:id", requireAdmin, catchAsync(async (req, res) => {
 }));
 
 app.post("/api/admissions", catchAsync(async (req, res) => {
-  validateRequired(req.body, ["studentName", "fatherName", "motherName", "classApplyingFor", "phone"]);
+  validateRequired(req.body, [
+    "studentName", "fatherName", "motherName", "classApplyingFor", "phone",
+    "birthCertificateImage", "previousSchoolCertificateImage",
+    "passportPhotosImage", "parentNidImage",
+  ]);
+
   const col = await admissionsCol();
   const doc = {
-    studentName: cleanString(req.body.studentName), fatherName: cleanString(req.body.fatherName), motherName: cleanString(req.body.motherName),
-    birthDate: cleanString(req.body.birthDate), bloodGroup: cleanString(req.body.bloodGroup), classApplyingFor: cleanString(req.body.classApplyingFor),
-    previousClass: cleanString(req.body.previousClass), phone: cleanString(req.body.phone), email: cleanString(req.body.email),
-    currentAddress: cleanString(req.body.currentAddress), permanentAddress: cleanString(req.body.permanentAddress),
-    status: "pending", createdAt: new Date(), updatedAt: new Date(),
+    studentName: cleanString(req.body.studentName),
+    fatherName: cleanString(req.body.fatherName),
+    motherName: cleanString(req.body.motherName),
+    birthDate: cleanString(req.body.birthDate),
+    bloodGroup: cleanString(req.body.bloodGroup),
+    classApplyingFor: cleanString(req.body.classApplyingFor),
+    previousClass: cleanString(req.body.previousClass),
+    phone: cleanString(req.body.phone),
+    email: cleanString(req.body.email),
+    currentAddress: cleanString(req.body.currentAddress),
+    permanentAddress: cleanString(req.body.permanentAddress),
+    birthCertificateImage: cleanString(req.body.birthCertificateImage),
+    previousSchoolCertificateImage: cleanString(req.body.previousSchoolCertificateImage),
+    passportPhotosImage: cleanString(req.body.passportPhotosImage),
+    parentNidImage: cleanString(req.body.parentNidImage),
+    status: "pending" as const,
+    createdAt: new Date(),
+    updatedAt: new Date(),
   };
+
   await col.insertOne(doc);
   await createNotification("New Admission", `${doc.studentName} applied for ${doc.classApplyingFor}.`);
   msg(res, "Application submitted successfully", 201);
@@ -1217,6 +1252,13 @@ app.get("/api/admissions", requireAdmin, catchAsync(async (req, res) => {
   const filter: Filter<Document> = {};
   if (req.query.status) filter.status = req.query.status;
   ok(res, await col.find(filter).sort({ createdAt: -1 }).toArray());
+}));
+
+app.get("/api/admissions/:id", requireAdmin, catchAsync(async (req, res) => {
+  const col = await admissionsCol();
+  const doc = await col.findOne({ _id: parseId(req.params.id) });
+  if (!doc) throw new AppError("Application not found", 404);
+  ok(res, doc);
 }));
 
 app.patch("/api/admissions/:id", requireAdmin, catchAsync(async (req, res) => {
@@ -1262,7 +1304,7 @@ app.get("/api/activity", requireAdmin, catchAsync(async (req, res) => {
 }));
 
 /* ==========================================================================
- * SECTION 22: SEARCH, EXPORT, UPLOAD
+ * SECTION 22: SEARCH, EXPORT, UPLOAD, IMAGE PROXY
  * ========================================================================== */
 
 app.get("/api/search", catchAsync(async (req, res) => {
@@ -1291,6 +1333,153 @@ app.get("/api/export/:collection", requireAdmin, catchAsync(async (req, res) => 
   res.json(data);
 }));
 
+const publicUploadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: "Too many uploads. Please try again later.",
+  },
+});
+
+app.post(
+  "/api/upload/public",
+  publicUploadLimiter,
+  upload.single("image"),
+  catchAsync(async (req, res) => {
+
+    // 1. Validate uploaded file
+    if (!req.file) {
+      throw new AppError(
+        "No image file provided. Use field 'image'.",
+        400
+      );
+    }
+
+    // 2. Validate ImgBB configuration
+    if (!IMGBB_API_KEY) {
+      throw new AppError(
+        "IMGBB_API_KEY is missing from backend environment.",
+        503
+      );
+    }
+
+    const controller = new AbortController();
+
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, 45000);
+
+    try {
+
+      // 3. Prepare ImgBB upload
+      const form = new FormData();
+
+      form.append(
+        "image",
+        req.file.buffer.toString("base64")
+      );
+
+      const endpoint = new URL(
+        "https://api.imgbb.com/1/upload"
+      );
+
+      endpoint.searchParams.set(
+        "key",
+        IMGBB_API_KEY
+      );
+
+      // 4. Send image to ImgBB
+      const imgResponse = await fetch(endpoint, {
+        method: "POST",
+        body: form,
+        signal: controller.signal,
+      });
+
+      // 5. Read ImgBB response
+      const imgData: any = await imgResponse
+        .json()
+        .catch(() => null);
+
+      const imageUrl = imgData?.data?.url;
+
+      // 6. Validate ImgBB response
+      if (
+        !imgResponse.ok ||
+        imgData?.success !== true ||
+        !imageUrl
+      ) {
+
+        console.error(
+          "IMG BB UPLOAD FAILED:",
+          {
+            status: imgResponse.status,
+            response: imgData,
+          }
+        );
+
+        throw new AppError(
+          imgData?.error?.message ||
+          `ImgBB upload failed. HTTP ${imgResponse.status}`,
+          502
+        );
+      }
+
+      // 7. Send consistent response to frontend
+      const displayUrl =
+        imgData?.data?.display_url || imageUrl;
+
+      console.log("✅ PUBLIC IMAGE UPLOAD SUCCESS");
+
+      return res.status(200).json({
+
+        success: true,
+
+        // Root-level URL for compatibility
+        url: imageUrl,
+
+        // Standard API response
+        data: {
+          url: imageUrl,
+          displayUrl: displayUrl,
+        },
+
+      });
+
+    } catch (error: any) {
+
+      if (error instanceof AppError) {
+        throw error;
+      }
+
+      console.error(
+        "PUBLIC UPLOAD ERROR:",
+        error
+      );
+
+      if (controller.signal.aborted) {
+        throw new AppError(
+          "ImgBB upload timed out. Please try again.",
+          504
+        );
+      }
+
+      throw new AppError(
+        "Unable to connect to ImgBB. Check your backend internet connection.",
+        502
+      );
+
+    } finally {
+
+      clearTimeout(timeout);
+
+    }
+
+  })
+);
+
 app.post("/api/upload", requireAdmin, upload.single("image"), catchAsync(async (req, res) => {
   if (!req.file) throw new AppError("No image file provided. Use field 'image'.", 400);
   if (!IMGBB_API_KEY) throw new AppError("Image upload not configured", 503);
@@ -1307,6 +1496,80 @@ app.post("/api/upload", requireAdmin, upload.single("image"), catchAsync(async (
     ok(res, { url: payload.data.url, displayUrl: payload.data.display_url || payload.data.url, deleteUrl: payload.data.delete_url || null });
   } finally { clearTimeout(timeout); }
 }));
+
+const IMAGE_PROXY_HOSTS = new Set([
+  "i.ibb.co.com",
+  "i.ibb.co",
+  "imgbb.com",
+  "images.unsplash.com",
+]);
+
+const imageProxyLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "Too many image proxy requests." },
+});
+
+app.get(
+  "/api/proxy/image",
+  imageProxyLimiter,
+  catchAsync(async (req, res) => {
+    const rawUrl = String(req.query.url || "").trim();
+    if (!rawUrl) throw new AppError("Missing 'url' query parameter", 400);
+
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      throw new AppError("Invalid URL format", 400);
+    }
+
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      throw new AppError("Only http/https URLs are allowed", 400);
+    }
+
+    if (!IMAGE_PROXY_HOSTS.has(parsed.hostname)) {
+      throw new AppError(`Host not allowed: ${parsed.hostname}`, 403);
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+
+    try {
+      const upstream = await fetch(parsed.toString(), {
+        method: "GET",
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; OasisBIAM/1.0)",
+          Accept: "image/*",
+        },
+      });
+
+      if (!upstream.ok) {
+        throw new AppError(`Upstream responded with ${upstream.status}`, 502);
+      }
+
+      const contentType = upstream.headers.get("content-type") || "image/jpeg";
+      if (!contentType.startsWith("image/")) {
+        throw new AppError(`Upstream returned non-image content: ${contentType}`, 502);
+      }
+
+      const cacheControl = upstream.headers.get("cache-control") || "public, max-age=86400";
+      const buffer = Buffer.from(await upstream.arrayBuffer());
+
+      res.setHeader("Content-Type", contentType);
+      res.setHeader("Cache-Control", cacheControl);
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Content-Length", String(buffer.length));
+      res.send(buffer);
+    } finally {
+      clearTimeout(timeout);
+    }
+  })
+);
 
 /* ==========================================================================
  * SECTION 23: GLOBAL ERROR HANDLING
