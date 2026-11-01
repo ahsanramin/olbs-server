@@ -22,6 +22,7 @@ import { MongoClient, ObjectId, Db, Collection, Document, Filter } from "mongodb
 import { betterAuth } from "better-auth";
 import { mongodbAdapter } from "better-auth/adapters/mongodb";
 import { toNodeHandler, fromNodeHeaders } from "better-auth/node";
+import { oAuthProxy } from "better-auth/plugins"; // ✅ ADDED FOR VERCEL OAUTH
 
 /* ==========================================================================
  * SECTION 2: ENVIRONMENT CONFIGURATION
@@ -477,12 +478,20 @@ function getAuth(): Promise<AuthInstance> {
             accountLinking: { enabled: true, trustedProviders: ["google"] } 
           },
           
+          // ✅ ADDED: oAuthProxy plugin for cross-domain Vercel deployments
+          plugins: [
+            oAuthProxy({
+              productionURL: "https://olbs-server.vercel.app", 
+            }),
+          ],
+
           // 🔥 CRITICAL FIX: Explicitly force the OAuth state cookie to be cross-site compatible
           cookies: {
             state: {
               attributes: {
                 sameSite: "none",
                 secure: true,
+                partitioned: true, // ✅ ADDED: Recommended for cross-site cookies
               },
             },
           },
@@ -498,10 +507,11 @@ function getAuth(): Promise<AuthInstance> {
           session: { expiresIn: 60 * 60 * 24 * 7, updateAge: 60 * 60 * 24 },
           advanced: {
             defaultCookieAttributes: {
-              sameSite: AUTH_COOKIE_SAME_SITE,
+              sameSite: IS_PRODUCTION ? "none" : AUTH_COOKIE_SAME_SITE, // ✅ Force 'none' in production
               secure: IS_PRODUCTION || AUTH_COOKIE_SAME_SITE === "none",
               httpOnly: true,
               path: "/",
+              partitioned: true, // ✅ ADDED: Recommended for cross-site cookies
             },
           },
           databaseHooks: {
