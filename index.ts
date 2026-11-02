@@ -130,6 +130,7 @@ interface GoverningBodyDoc extends BaseDoc {
   image: string | null;
   isChairman: boolean;
   order: number;
+  message?: string; // Stored Chairman's message
 }
 
 interface ContactDoc extends BaseDoc {
@@ -426,12 +427,57 @@ async function sendVerificationEmail(user: { name?: string | null; email: string
 }
 
 /* ==========================================================================
- * SECTION 11: LAZY BETTER AUTH FACTORY (🔧 Vercel Rewrite Setup)
+ * SECTION 11: LAZY BETTER AUTH FACTORY & ADMIN SEEDER
  * ========================================================================== */
 
 type AuthInstance = ReturnType<typeof betterAuth>;
 let authInstance: AuthInstance | null = null;
 let authPromise: Promise<AuthInstance> | null = null;
+
+// 🔧 Automatically ensures the admin account has a valid email/password
+async function ensureAdminAccount(auth: AuthInstance) {
+  if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
+    console.log("ℹ️ ADMIN_EMAIL or ADMIN_PASSWORD not set. Skipping admin seed.");
+    return;
+  }
+
+  try {
+    const db = await getDB();
+    const existingUser = await db.collection("user").findOne({ email: ADMIN_EMAIL });
+
+    if (!existingUser) {
+      console.log(`⏳ Admin account not found. Creating for ${ADMIN_EMAIL}...`);
+      await auth.api.signUpEmail({
+        body: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD, name: ADMIN_NAME }
+      });
+      console.log(`✅ Admin account created successfully with email/password.`);
+    } else {
+      // Check if the user has a credential (password) account
+      const credentialAccount = await db.collection("account").findOne({ 
+        userId: existingUser.id, 
+        providerId: "credential" 
+      });
+
+      if (!credentialAccount) {
+        console.log(`🔄 Admin exists but has no password (likely Google OAuth). Fixing account...`);
+        
+        // Safely delete the old Google-only account so we can recreate it with a password
+        await db.collection("user").deleteOne({ _id: existingUser._id });
+        await db.collection("account").deleteMany({ userId: existingUser.id });
+        await db.collection("session").deleteMany({ userId: existingUser.id });
+
+        await auth.api.signUpEmail({
+          body: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD, name: ADMIN_NAME }
+        });
+        console.log(`✅ Admin account successfully recreated with email/password.`);
+      } else {
+        console.log(`✅ Admin account already exists with a valid password.`);
+      }
+    }
+  } catch (err: any) {
+    console.error("❌ Failed to ensure admin account:", err.message);
+  }
+}
 
 function getAuth(): Promise<AuthInstance> {
   if (authInstance) return Promise.resolve(authInstance);
@@ -441,7 +487,7 @@ function getAuth(): Promise<AuthInstance> {
       .then((db) => {
         const instance = betterAuth({
           secret: BETTER_AUTH_SECRET!,
-          baseURL: BETTER_AUTH_URL, // In production, this is now the FRONTEND URL due to rewrites
+          baseURL: BETTER_AUTH_URL, 
           database: mongodbAdapter(db),
           
           trustedOrigins: [
@@ -485,7 +531,7 @@ function getAuth(): Promise<AuthInstance> {
           session: { expiresIn: 60 * 60 * 24 * 7, updateAge: 60 * 60 * 24 },
           advanced: {
             defaultCookieAttributes: {
-              sameSite: "lax", // Safe for same-origin rewrite setup
+              sameSite: "lax",
               secure: IS_PRODUCTION,
               httpOnly: true,
               path: "/",
@@ -510,6 +556,10 @@ function getAuth(): Promise<AuthInstance> {
 
         authInstance = instance;
         console.log("✅ Better Auth instance created");
+        
+        // Run the self-healing admin seeder
+        ensureAdminAccount(instance).catch(console.error);
+
         return instance;
       })
       .catch((err) => {
@@ -759,6 +809,7 @@ app.get("/api/docs", (_req, res) => {
     { method: "DELETE", path: "/api/teachers/:id", desc: "Delete faculty (admin)" },
     { method: "GET", path: "/api/governing-body", desc: "List governing body" },
     { method: "POST", path: "/api/governing-body", desc: "Add member (admin)" },
+    { method: "PATCH", path: "/api/governing-body/:id", desc: "Update member (admin)" },
     { method: "DELETE", path: "/api/governing-body/:id", desc: "Remove member (admin)" },
     { method: "GET", path: "/api/gallery", desc: "List gallery" },
     { method: "POST", path: "/api/gallery", desc: "Add image (admin)" },
@@ -1040,14 +1091,52 @@ app.get("/api/governing-body/:id", catchAsync(async (req, res) => {
   ok(res, doc);
 }));
 
+// 🔧 UPDATED: POST now saves the message
 app.post("/api/governing-body", requireAdmin, catchAsync(async (req, res) => {
   validateRequired(req.body, ["name", "position"]);
   const col = await governingCol();
   if (req.body.isChairman) await col.updateMany({}, { $set: { isChairman: false } });
-  const doc = { name: cleanString(req.body.name), position: cleanString(req.body.position), image: req.body.image || null, isChairman: !!req.body.isChairman, order: req.body.order || 999, createdAt: new Date(), updatedAt: new Date() };
+  
+  const doc = { 
+    name: cleanString(req.body.name), 
+    position: cleanString(req.body.position), 
+    image: req.body.image || null, 
+    isChairman: !!req.body.isChairman, 
+    order: req.body.order || 999, 
+    message: sanitizeInput(cleanString(req.body.message)), // <-- ADDED
+    createdAt: new Date(), 
+    updatedAt: new Date() 
+  };
+  
   const result = await col.insertOne(doc);
   await logActivity(req, "governingBody.create", "governingBody", result.insertedId.toString());
   ok(res, { _id: result.insertedId, ...doc }, 201);
+}));
+
+// 🔧 NEW: PATCH route so you can edit the message later
+app.patch("/api/governing-body/:id", requireAdmin, catchAsync(async (req, res) => {
+  const col = await governingCol();
+  const update: any = { ...req.body, updatedAt: new Date() }; 
+  delete update._id;
+  
+  if (update.message !== undefined) {
+    update.message = sanitizeInput(cleanString(update.message));
+  }
+
+  // If setting as chairman, demote others
+  if (req.body.isChairman) {
+    await col.updateMany({ _id: { $ne: parseId(req.params.id) } }, { $set: { isChairman: false } });
+  }
+  
+  const result = await col.findOneAndUpdate(
+    { _id: parseId(req.params.id) }, 
+    { $set: update }, 
+    { returnDocument: "after" }
+  );
+  
+  if (!result) throw new AppError("Member not found", 404);
+  await logActivity(req, "governingBody.update", "governingBody", req.params.id);
+  ok(res, result);
 }));
 
 app.delete("/api/governing-body/:id", requireAdmin, catchAsync(async (req, res) => {
