@@ -130,7 +130,7 @@ interface GoverningBodyDoc extends BaseDoc {
   image: string | null;
   isChairman: boolean;
   order: number;
-  message?: string; // Stored Chairman's message
+  message?: string;
 }
 
 interface ContactDoc extends BaseDoc {
@@ -541,12 +541,24 @@ function getAuth(): Promise<AuthInstance> {
             user: {
               create: {
                 after: async (user: any) => {
-                  if (ADMIN_EMAIL && user.email === ADMIN_EMAIL) {
-                    try {
-                      const db = await getDB();
-                      await db.collection("user").updateOne({ email: user.email }, { $set: { role: "admin" } });
-                      console.log(`👑 Auto-promoted ${user.email} to admin`);
-                    } catch (e) { console.error("Auto-promote failed:", e); }
+                  // 🔧 FIX: Automatically verify email if created via Google, 
+                  // or if it's the admin account.
+                  try {
+                    const db = await getDB();
+                    const isAdminEmail = ADMIN_EMAIL && user.email === ADMIN_EMAIL;
+                    
+                    await db.collection("user").updateOne(
+                      { email: user.email }, 
+                      { $set: { 
+                          role: isAdminEmail ? "admin" : "member", 
+                          emailVerified: true 
+                      } }
+                    );
+                    
+                    if (isAdminEmail) console.log(`👑 Auto-promoted and verified admin: ${user.email}`);
+                    else console.log(`✅ Auto-verified new user: ${user.email}`);
+                  } catch (e) { 
+                    console.error("Auto-verify failed:", e); 
                   }
                 },
               },
@@ -768,6 +780,13 @@ app.get("/api/health", catchAsync(async (req, res) => {
   }
 
   res.status(dbOk ? 200 : 503).json({ success: dbOk, data: health });
+}));
+
+// 🔧 TEMP ROUTE: Run this once to verify all existing users in your database
+app.get("/api/auth/verify-all", catchAsync(async (_req, res) => {
+  const db = await getDB();
+  const result = await db.collection("user").updateMany({}, { $set: { emailVerified: true } });
+  ok(res, { message: `Verified ${result.modifiedCount} users successfully. You can now log in with Google.` });
 }));
 
 app.get("/api/home", catchAsync(async (_req, res) => {
