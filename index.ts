@@ -770,8 +770,10 @@ app.get("/api/auth/verify-all", catchAsync(async (_req, res) => {
 app.get("/api/home", catchAsync(async (_req, res) => {
   const [tCol, gCol, aCol, nCol, eCol] = await Promise.all([teachersCol(), governingCol(), articlesCol(), noticesCol(), eventsCol()]);
   const [principal, vicePrincipal, chairman, teachers, articles, notices, upcomingEvents] = await Promise.all([
-    tCol.findOne({ role: "principal" }), tCol.findOne({ role: "vice-principal" }), gCol.findOne({ isChairman: true }),
-    tCol.find({ role: "teacher" }).sort({ order: 1 }).limit(8).toArray(),
+    tCol.findOne({ role: "principal" }), 
+    tCol.findOne({ role: "vice-principal" }), 
+    gCol.findOne({ isChairman: true }),
+    tCol.find({ role: "teacher" }).sort({ order: 1 }).toArray(), // 🔧 FIXED: Removed .limit(8) so ALL teachers show
     aCol.find({}).sort({ createdAt: -1 }).limit(3).toArray(),
     nCol.find({}).sort({ featured: -1, createdAt: -1 }).limit(4).toArray(),
     eCol.find({}).sort({ date: 1 }).limit(3).toArray(),
