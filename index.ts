@@ -434,7 +434,7 @@ type AuthInstance = ReturnType<typeof betterAuth>;
 let authInstance: AuthInstance | null = null;
 let authPromise: Promise<AuthInstance> | null = null;
 
-// 🔧 Automatically ensures the admin account has a valid email/password
+// 🔧 SAFE: Only creates the initial admin if missing. NEVER deletes anything.
 async function ensureAdminAccount(auth: AuthInstance) {
   if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
     console.log("ℹ️ ADMIN_EMAIL or ADMIN_PASSWORD not set. Skipping admin seed.");
@@ -452,27 +452,7 @@ async function ensureAdminAccount(auth: AuthInstance) {
       });
       console.log(`✅ Admin account created successfully with email/password.`);
     } else {
-      // Check if the user has a credential (password) account
-      const credentialAccount = await db.collection("account").findOne({ 
-        userId: existingUser.id, 
-        providerId: "credential" 
-      });
-
-      if (!credentialAccount) {
-        console.log(`🔄 Admin exists but has no password (likely Google OAuth). Fixing account...`);
-        
-        // Safely delete the old Google-only account so we can recreate it with a password
-        await db.collection("user").deleteOne({ _id: existingUser._id });
-        await db.collection("account").deleteMany({ userId: existingUser.id });
-        await db.collection("session").deleteMany({ userId: existingUser.id });
-
-        await auth.api.signUpEmail({
-          body: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD, name: ADMIN_NAME }
-        });
-        console.log(`✅ Admin account successfully recreated with email/password.`);
-      } else {
-        console.log(`✅ Admin account already exists with a valid password.`);
-      }
+      console.log(`✅ Admin account already exists. Skipping creation.`);
     }
   } catch (err: any) {
     console.error("❌ Failed to ensure admin account:", err.message);
@@ -492,6 +472,7 @@ function getAuth(): Promise<AuthInstance> {
           
           trustedOrigins: [
             CLIENT_URL,
+            "https://oasis-biam-laboratory-school.vercel.app",
             "http://localhost:3000",
             "http://127.0.0.1:3000"
           ],
@@ -541,8 +522,6 @@ function getAuth(): Promise<AuthInstance> {
             user: {
               create: {
                 after: async (user: any) => {
-                  // 🔧 FIX: Automatically verify email if created via Google, 
-                  // or if it's the admin account.
                   try {
                     const db = await getDB();
                     const isAdminEmail = ADMIN_EMAIL && user.email === ADMIN_EMAIL;
@@ -569,7 +548,6 @@ function getAuth(): Promise<AuthInstance> {
         authInstance = instance;
         console.log("✅ Better Auth instance created");
         
-        // Run the self-healing admin seeder
         ensureAdminAccount(instance).catch(console.error);
 
         return instance;
